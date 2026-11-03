@@ -26,6 +26,15 @@ func TestMasterPlaylist(t *testing.T) {
 	require.Contains(t, got, "480p.m3u8?t=123")
 }
 
+func TestAudioMasterPlaylist(t *testing.T) {
+	got, err := MasterPlaylist([]core.Rendition{{Quality: "audio", Bitrate: 128000}}, 0, "")
+	require.NoError(t, err)
+	require.Contains(t, got, "BANDWIDTH=128000")
+	require.Contains(t, got, "audio.m3u8")
+	require.NotContains(t, got, "RESOLUTION")
+	require.NotContains(t, got, "FRAME-RATE")
+}
+
 func TestTranscodeVariantPlaylist(t *testing.T) {
 	got, err := TranscodeVariantPlaylist("720p", 62*time.Second+500*time.Millisecond, 3, "?t=123")
 	require.NoError(t, err)

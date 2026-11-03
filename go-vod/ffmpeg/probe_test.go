@@ -78,6 +78,25 @@ func TestParseProbeJSONAudio(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseProbeJSONAudioOnly(t *testing.T) {
+	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"audio","codec_name":"flac","channels":2,"sample_rate":"44100"}],"format":{"duration":"62.5","bit_rate":"900000"}}`))
+	require.NoError(t, err)
+	require.True(t, info.AudioOnly)
+	require.Equal(t, "flac", info.Audio.CodecName)
+	require.Zero(t, info.Width)
+	for _, raw := range []string{`{"streams":[],"format":{"duration":"12"}}`, `{"streams":[{"codec_type":"audio"}],"format":{"duration":"0"}}`} {
+		_, err = ParseProbeJSON([]byte(raw))
+		require.Error(t, err)
+	}
+}
+
+func TestAudioCoverArtDoesNotBecomeVideo(t *testing.T) {
+	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,"disposition":{"attached_pic":1}},{"codec_type":"audio","codec_name":"mp3","channels":2,"sample_rate":"44100"}],"format":{"duration":"60"}}`))
+	require.NoError(t, err)
+	require.True(t, info.AudioOnly)
+	require.Equal(t, "mp3", info.Audio.CodecName)
+}
+
 func TestParseKeyframes(t *testing.T) {
 	require.Equal(t,
 		[]float64{0, 2.5},

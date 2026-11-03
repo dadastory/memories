@@ -429,3 +429,29 @@ func TestCopySegments(t *testing.T) {
 	require.Nil(t, CopySegments([]float64{0}, 0, 3))
 	require.Nil(t, CopySegments([]float64{0}, 11*time.Second, 0))
 }
+
+func TestPreviewUsesExactEvenDisplayDimensions(t *testing.T) {
+	for _, item := range []struct {
+		name                    string
+		width, height, rotation int
+		transpose               bool
+		filter                  string
+	}{
+		{"landscape", 852, 480, 0, false, "scale=w=852:h=480"},
+		{"portrait", 270, 480, 0, false, "scale=w=270:h=480"},
+		{"autorotated", 270, 480, 90, false, "scale=w=270:h=480"},
+		{"manual rotation", 270, 480, 90, true, "scale=w=480:h=270"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			s := baseSpec()
+			s.DisplayDimensions = true
+			s.Width = item.width
+			s.Height = item.height
+			s.Rotation = item.rotation
+			s.UseTranspose = item.transpose
+			command := cmd(s, BuildArgs(s))
+			require.Contains(t, command, item.filter)
+			require.NotContains(t, command, "force_original_aspect_ratio")
+		})
+	}
+}

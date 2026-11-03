@@ -81,11 +81,28 @@ func (b *FilterBuilder) scaleDims() []string {
 	if b.s.Quality == QualityMax {
 		return nil
 	}
+	if b.s.DisplayDimensions {
+		width, height := b.s.Width, b.s.Height
+		if b.s.UseTranspose && b.s.Rotation%180 != 0 {
+			width, height = height, width
+		}
+		return []string{fmt.Sprintf("w=%d", width), fmt.Sprintf("h=%d", height)}
+	}
 	maxDim := max(b.s.Width, b.s.Height)
 	return []string{
 		fmt.Sprintf("w=%d", maxDim),
 		fmt.Sprintf("h=%d", maxDim),
 	}
+}
+
+// Derived preview dimensions already preserve the source's display geometry.
+// A second aspect calculation against a square box can create odd encoder
+// dimensions (e.g. 852x479) and disagree with the advertised rendition.
+func (b *FilterBuilder) scaleAspect() []string {
+	if b.s.DisplayDimensions {
+		return nil
+	}
+	return []string{"force_original_aspect_ratio=decrease"}
 }
 
 // scaleEncode renders the downscale in the encode domain: hardware per
@@ -104,9 +121,7 @@ func (b *FilterBuilder) scaleEncode(format string) {
 	}
 
 	// Base args always preserve aspect ratio.
-	args := []string{
-		"force_original_aspect_ratio=decrease",
-	}
+	args := b.scaleAspect()
 
 	// Convert to the encode format, except on software where the
 	// scaler must preserve source depth (e.g. HDR before tonemap).
@@ -128,9 +143,7 @@ func (b *FilterBuilder) scaleEncode(format string) {
 
 // scaleCpu renders the software downscale preserving source depth.
 func (b *FilterBuilder) scaleCpu() {
-	args := []string{
-		"force_original_aspect_ratio=decrease",
-	}
+	args := b.scaleAspect()
 	args = append(args, b.scaleDims()...)
 	b.append(fmt.Sprintf("scale=%s", strings.Join(args, ":")))
 }

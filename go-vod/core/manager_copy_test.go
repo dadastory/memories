@@ -179,7 +179,8 @@ func TestManagerDirectChunkFallsBack(t *testing.T) {
 	// Empty grid serves (re-encode attempt) instead of 404.
 	w := httptest.NewRecorder()
 	require.True(t, m.ServeChunk(w, QUALITY_DIRECT, 0))
-	require.Equal(t, http.StatusRequestTimeout, w.Code)
+	// Missing ffmpeg is an immediate setup failure, not a chunk timeout.
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 }
 
 // newBlockingCopyManager fakes ffprobe with a keyframe pass that signals

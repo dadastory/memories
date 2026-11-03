@@ -33,6 +33,7 @@ const (
 )
 
 type VideoInfo struct {
+	AudioOnly bool
 	Width     int
 	Height    int
 	Duration  time.Duration
@@ -72,11 +73,23 @@ type probeOutput struct {
 
 // Probe runs ffprobe and parses the first video stream.
 func Probe(ctx context.Context, bin, fileURL, headers string) (VideoInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
+	return ProbeWithFormats(ctx, bin, fileURL, headers, "")
+}
+
+// ProbeWithFormats limits HTTP source demuxers to ordinary media containers,
+// excluding playlists capable of issuing further requests to arbitrary origins.
+func ProbeWithFormats(ctx context.Context, bin, fileURL, headers, formats string) (VideoInfo, error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, probeTimeout)
+		defer cancel()
+	}
 
 	args := []string{
 		"-v", "error",
+	}
+	if formats != "" {
+		args = append(args, "-format_whitelist", formats, "-protocol_whitelist", "http,https,tls,tcp")
 	}
 	if headers != "" {
 		args = append(args, "-headers", headers)
@@ -111,13 +124,17 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 	}
 	var s *videoStream
 	for i := range out.Streams {
-		if out.Streams[i].CodecType == "video" {
+		if out.Streams[i].CodecType == "video" && out.Streams[i].Disposition.AttachedPic == 0 {
 			s = &out.Streams[i]
 			break
 		}
 	}
 	if s == nil {
-		return VideoInfo{}, errors.New("no video streams found")
+		audio := probeAudio(out.Streams)
+		if audio.CodecName == "" || out.Format == nil || out.Format.Duration() <= 0 {
+			return VideoInfo{}, errors.New("no playable media streams found")
+		}
+		return VideoInfo{AudioOnly: true, Duration: out.Format.Duration(), Audio: audio, BitRate: audio.BitRate}, nil
 	}
 
 	var duration time.Duration

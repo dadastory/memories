@@ -10,12 +10,21 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
+	"golang.org/x/sync/semaphore"
 )
 
 type Config struct {
-	Bind string `json:"bind" validate:"required"`
+	// InputFormats restricts untrusted original sources; empty preserves native behavior.
+	InputFormats string
+
+	// Optional shared process budget supplied by an embedding service.
+	EncoderSlots *semaphore.Weighted `json:"-"`
+	ProbeSlots   *semaphore.Weighted `json:"-"`
+	ProbeTimeout time.Duration       `json:"-"`
+	Bind         string              `json:"bind" validate:"required"`
 
 	FFmpeg    string `json:"ffmpeg" validate:"required"`
 	FFprobe   string `json:"ffprobe" validate:"required"`

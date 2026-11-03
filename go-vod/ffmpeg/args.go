@@ -19,6 +19,12 @@ import (
 // The zero value selects software x264. Set VAAPI or NVENC (never both;
 // VAAPI wins) for hardware.
 type Spec struct {
+	InputFormats     string
+	AudioOnly        bool
+	AudioBitrateKbps int
+	VideoBitrateKbps int
+	Threads          int
+	Duration         float64
 	// Bin is the ffmpeg executable. Informational only (callers prepend it
 	// via exec.Command); kept so tests render complete command lines.
 	Bin string
@@ -38,6 +44,9 @@ type Spec struct {
 	// Width is always the larger source dimension, scaled proportionally
 	// (callers swap axes for portrait sources).
 	Width, Height int
+	// DisplayDimensions uses the source-derived, even display axes exactly.
+	// Legacy renditions retain their aspect-preserving maximum-dimension box.
+	DisplayDimensions bool
 	// QF is the quality factor: CRF (x264), global_quality (VA-API), CQ (NVENC).
 	QF int
 	// FrameRate is the probed source fps, truncated to int. Only sizes the
@@ -151,12 +160,23 @@ func reconnectArgs() []string {
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}
+	if s.Threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(s.Threads), "-filter_threads", strconv.Itoa(s.Threads))
+	}
 
 	if s.StartAt > 0 {
 		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
 	}
+	// Bound the input interval. Output-side -t with copyts compares absolute
+	// timestamps and can stop before a seeked input emits its first packet.
+	if s.Duration > 0 {
+		args = append(args, "-t", strconv.FormatFloat(s.Duration, 'f', 6, 64))
+	}
 
 	cv := Encoder(s)
+	if s.AudioOnly {
+		cv = EncoderCopy
+	}
 	switch cv {
 	case EncoderVAAPI:
 		dev := s.VAAPIDevice
@@ -190,6 +210,9 @@ func BuildArgs(s Spec) []string {
 		args = append(args, "-noautorotate")
 	}
 
+	if s.InputFormats != "" {
+		args = append(args, "-format_whitelist", s.InputFormats, "-protocol_whitelist", "http,https,tls,tcp")
+	}
 	if s.Headers != "" {
 		args = append(args,
 			"-multiple_requests", "1",
@@ -203,7 +226,17 @@ func BuildArgs(s Spec) []string {
 		"-copyts",
 		"-fflags", "+genpts",
 	)
+	if s.Threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(s.Threads))
+	}
+	audioBitrate := "128k"
+	if s.AudioBitrateKbps > 0 {
+		audioBitrate = strconv.Itoa(s.AudioBitrateKbps) + "k"
+	}
 
+	if s.AudioOnly {
+		return append(args, "-vn", "-map", "0:a:0", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", audioBitrate)
+	}
 	if cv != EncoderCopy {
 		b := NewFilterBuilder(s, cv)
 
@@ -276,16 +309,19 @@ func BuildArgs(s Spec) []string {
 
 	if s.Audio.CodecName != "" {
 		args = append(args, "-map", "0:a:0?")
-		if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
+		if !s.HLS && s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
 			args = append(args, "-c:a", "copy")
 		} else {
 			args = append(args,
 				"-c:a", "aac",
 				"-ac", "2",
 				"-ar", "48000",
-				"-b:a", "128k",
+				"-b:a", audioBitrate,
 			)
 		}
+	}
+	if !s.Copy && s.VideoBitrateKbps > 0 {
+		args = append(args, "-b:v", strconv.Itoa(s.VideoBitrateKbps)+"k", "-maxrate", strconv.Itoa(s.VideoBitrateKbps)+"k", "-bufsize", strconv.Itoa(s.VideoBitrateKbps*2)+"k")
 	}
 
 	return args
@@ -318,10 +354,11 @@ func SegmentArgs(s Spec, startID int, pattern string) []string {
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", s.ChunkSize),
 		"-hls_segment_type", "mpegts",
+		"-hls_segment_options", "mpegts_copyts=1",
 		"-hls_segment_filename", pattern,
 	)
 
-	if !s.Copy {
+	if !s.Copy && !s.AudioOnly {
 		// HLS may otherwise duplicate VFR frames to match the probed r_frame_rate.
 		args = append(args, "-fps_mode", "passthrough")
 

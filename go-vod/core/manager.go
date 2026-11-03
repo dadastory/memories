@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -67,7 +66,8 @@ type Manager struct {
 	// idle reports expiry to the registry.
 	idle chan IdleEvent
 	// inactive counts ticks since any transcode (-1 once destroyed).
-	inactive atomic.Int32
+	inactive    atomic.Int32
+	destroyOnce sync.Once
 
 	// probe holds the source properties, immutable after creation.
 	probe *ProbeVideoData
@@ -96,6 +96,7 @@ type Manager struct {
 }
 
 type ProbeVideoData struct {
+	AudioOnly bool
 	Width     int
 	Height    int
 	Duration  time.Duration
@@ -125,6 +126,13 @@ type NewManagerArgs struct {
 }
 
 func NewManager(a NewManagerArgs) (*Manager, error) {
+	return newManager(context.Background(), a)
+}
+
+func newManager(ctx context.Context, a NewManagerArgs) (*Manager, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m := &Manager{
 		c:              a.C,
 		tc:             a.TConfig,
@@ -141,14 +149,16 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 	m.streams = make(map[string]*Stream)
 
-	h := fnv.New32a()
-	h.Write([]byte(m.url))
-	ph := fmt.Sprint(h.Sum32())
-	m.tempDir = fmt.Sprintf("%s/%s-%s", m.c.TempDir, m.id, ph)
-
-	// Delete temp dir if exists
-	os.RemoveAll(m.tempDir)
-	os.MkdirAll(m.tempDir, 0755)
+	// Each manager generation owns a distinct directory. Destroying a stale
+	// generation must never remove the replacement's active segments.
+	if err := os.MkdirAll(m.c.TempDir, 0755); err != nil {
+		return nil, err
+	}
+	var err error
+	m.tempDir, err = os.MkdirTemp(m.c.TempDir, m.id+"-")
+	if err != nil {
+		return nil, err
+	}
 
 	// Temp-file inputs need full file downloaded.
 	if m.usesTemp {
@@ -158,104 +168,124 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		}
 	}
 
-	if err := m.ffprobe(); err != nil {
-		if m.usesTemp {
-			os.RemoveAll(m.tempDir)
+	if err := m.ffprobe(ctx); err != nil {
+		return nil, errors.Join(err, os.RemoveAll(m.tempDir))
+	}
+
+	if m.probe.AudioOnly {
+		bitrate := 128000
+		if m.tc.AudioBitrateKbps > 0 {
+			bitrate = m.tc.AudioBitrateKbps * 1000
 		}
-		return nil, err
-	}
-
-	// Possible streams
-	m.streams["480p"] = &Stream{c: m.c, m: m, quality: "480p", height: 480, width: 854, bitrate: 400}
-	m.streams["720p"] = &Stream{c: m.c, m: m, quality: "720p", height: 720, width: 1280, bitrate: 700}
-	m.streams["1080p"] = &Stream{c: m.c, m: m, quality: "1080p", height: 1080, width: 1920, bitrate: 1000}
-	m.streams["1440p"] = &Stream{c: m.c, m: m, quality: "1440p", height: 1440, width: 2560, bitrate: 1400}
-	m.streams["2160p"] = &Stream{c: m.c, m: m, quality: "2160p", height: 2160, width: 3840, bitrate: 3000}
-
-	// height is our primary dimension for scaling
-	// using the probed size, we adjust the width of the stream
-	// the smaller dimemension of the output should match the height here
-	smDim, lgDim := m.probe.Height, m.probe.Width
-	if m.probe.Height > m.probe.Width {
-		smDim, lgDim = lgDim, smDim
-	}
-
-	// Get the reference bitrate. This is half the current bitrate
-	// if the video is H.264, otherwise use the current bitrate.
-	refBitrate := int(float64(m.probe.BitRate) / 2.0)
-	if m.probe.CodecName != CODEC_H264 {
-		refBitrate *= 2
-	}
-
-	// If bitrate could not be read, use 10Mbps
-	if refBitrate == 0 {
-		refBitrate = 10000000
-	}
-
-	// Get the multiplier for the reference bitrate.
-	// For this get the nearest stream size to the original.
-	origPixels := float64(m.probe.Height * m.probe.Width)
-	nearestPixels := float64(0)
-	nearestStream := ""
-	for key, stream := range m.streams {
-		streamPixels := float64(stream.height * stream.width)
-		if nearestPixels == 0 || math.Abs(origPixels-streamPixels) < math.Abs(origPixels-nearestPixels) {
-			nearestPixels = streamPixels
-			nearestStream = key
+		m.streams["audio"] = &Stream{c: m.c, m: m, quality: "audio", bitrate: bitrate}
+	} else if m.tc.AdaptivePreview {
+		if err := m.addAdaptivePreviewStreams(); err != nil {
+			return nil, errors.Join(err, os.RemoveAll(m.tempDir))
 		}
-	}
-
-	// Get the bitrate multiplier. This is the ratio of the reference
-	// bitrate to the nearest stream bitrate, so we can scale all streams.
-	bitrateMultiplier := 1.0
-	if nearestStream != "" {
-		bitrateMultiplier = float64(refBitrate) / float64(m.streams[nearestStream].bitrate)
-	}
-
-	// Only keep streams that are smaller than the video
-	for k, stream := range m.streams {
-		stream.order = 0
-
-		// scale bitrate using the multiplier
-		stream.bitrate = int(math.Ceil(float64(stream.bitrate) * bitrateMultiplier))
-
-		// now store the width of the stream as the larger dimension
-		stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
-
-		// remove invalid streams
-		if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
-			(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) || // no more than 80% of original bitrate
-			(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
-
-			// remove stream
-			delete(m.streams, k)
-			continue
+	} else if m.tc.MaxHeight > 0 {
+		small, large := m.probe.Height, m.probe.Width
+		if small > large {
+			small, large = large, small
 		}
-	}
-
-	// Original: stream copy as direct when eligible. Keyframes are not
-	// extracted here; direct.m3u8 triggers EnsureCopySegments on demand,
-	// so index.m3u8 and 480p etc stay fast.
-	if m.IsCopyEligible() {
-		m.streams[QUALITY_DIRECT] = &Stream{
-			c: m.c, m: m,
-			quality: QUALITY_DIRECT,
-			height:  m.probe.Height,
-			width:   m.probe.Width,
-			bitrate: m.probe.BitRate,
-			order:   1,
+		height := min(small, m.tc.MaxHeight) / 2 * 2
+		width := int(float64(large)*float64(height)/float64(small)) / 2 * 2
+		if width < 2 || height < 2 {
+			return nil, errors.Join(errors.New("invalid preview dimensions"), os.RemoveAll(m.tempDir))
 		}
+		m.streams["preview"] = &Stream{c: m.c, m: m, quality: "preview", width: width, height: height, bitrate: (m.tc.VideoBitrateKbps + m.tc.AudioBitrateKbps) * 1000}
 	} else {
-		m.streams[QUALITY_MAX] = &Stream{
-			c: m.c, m: m,
-			quality: QUALITY_MAX,
-			height:  m.probe.Height,
-			width:   m.probe.Width,
-			bitrate: refBitrate,
-			order:   1,
-		}
-	}
+		// Possible streams
+		m.streams["480p"] = &Stream{c: m.c, m: m, quality: "480p", height: 480, width: 854, bitrate: 400}
+		m.streams["720p"] = &Stream{c: m.c, m: m, quality: "720p", height: 720, width: 1280, bitrate: 700}
+		m.streams["1080p"] = &Stream{c: m.c, m: m, quality: "1080p", height: 1080, width: 1920, bitrate: 1000}
+		m.streams["1440p"] = &Stream{c: m.c, m: m, quality: "1440p", height: 1440, width: 2560, bitrate: 1400}
+		m.streams["2160p"] = &Stream{c: m.c, m: m, quality: "2160p", height: 2160, width: 3840, bitrate: 3000}
 
+		// height is our primary dimension for scaling
+		// using the probed size, we adjust the width of the stream
+		// the smaller dimemension of the output should match the height here
+		smDim, lgDim := m.probe.Height, m.probe.Width
+		if m.probe.Height > m.probe.Width {
+			smDim, lgDim = lgDim, smDim
+		}
+
+		// Get the reference bitrate. This is half the current bitrate
+		// if the video is H.264, otherwise use the current bitrate.
+		refBitrate := int(float64(m.probe.BitRate) / 2.0)
+		if m.probe.CodecName != CODEC_H264 {
+			refBitrate *= 2
+		}
+
+		// If bitrate could not be read, use 10Mbps
+		if refBitrate == 0 {
+			refBitrate = 10000000
+		}
+
+		// Get the multiplier for the reference bitrate.
+		// For this get the nearest stream size to the original.
+		origPixels := float64(m.probe.Height * m.probe.Width)
+		nearestPixels := float64(0)
+		nearestStream := ""
+		for key, stream := range m.streams {
+			streamPixels := float64(stream.height * stream.width)
+			if nearestPixels == 0 || math.Abs(origPixels-streamPixels) < math.Abs(origPixels-nearestPixels) {
+				nearestPixels = streamPixels
+				nearestStream = key
+			}
+		}
+
+		// Get the bitrate multiplier. This is the ratio of the reference
+		// bitrate to the nearest stream bitrate, so we can scale all streams.
+		bitrateMultiplier := 1.0
+		if nearestStream != "" {
+			bitrateMultiplier = float64(refBitrate) / float64(m.streams[nearestStream].bitrate)
+		}
+
+		// Only keep streams that are smaller than the video
+		for k, stream := range m.streams {
+			stream.order = 0
+
+			// scale bitrate using the multiplier
+			stream.bitrate = int(math.Ceil(float64(stream.bitrate) * bitrateMultiplier))
+
+			// now store the width of the stream as the larger dimension
+			stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
+
+			// remove invalid streams
+			if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
+				(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) || // no more than 80% of original bitrate
+				(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
+
+				// remove stream
+				delete(m.streams, k)
+				continue
+			}
+		}
+
+		// Original: stream copy as direct when eligible. Keyframes are not
+		// extracted here; direct.m3u8 triggers EnsureCopySegments on demand,
+		// so index.m3u8 and 480p etc stay fast.
+		if m.IsCopyEligible() {
+			m.streams[QUALITY_DIRECT] = &Stream{
+				c: m.c, m: m,
+				quality: QUALITY_DIRECT,
+				height:  m.probe.Height,
+				width:   m.probe.Width,
+				bitrate: m.probe.BitRate,
+				order:   1,
+			}
+		} else {
+			m.streams[QUALITY_MAX] = &Stream{
+				c: m.c, m: m,
+				quality: QUALITY_MAX,
+				height:  m.probe.Height,
+				width:   m.probe.Width,
+				bitrate: refBitrate,
+				order:   1,
+			}
+		}
+
+	}
 	// Start all streams
 	for _, stream := range m.streams {
 		stream.init()
@@ -264,55 +294,61 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	log.Printf("%s: new manager for file %d", m.id, m.fileid)
 
-	// Check for inactivity
-	go func() {
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for {
-			<-t.C
+	// Zero delegates cache expiry to the embedding service (e.g. Temporal).
+	if m.c.ManagerIdleTime > 0 {
+		go func() {
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				<-t.C
 
-			if m.inactive.Load() == -1 {
-				t.Stop()
-				return
-			}
+				if m.inactive.Load() == -1 {
+					t.Stop()
+					return
+				}
 
-			m.inactive.Add(1)
+				m.inactive.Add(1)
 
-			// Check if any stream is active
-			for _, stream := range m.streams {
-				stream.mutex.Lock()
-				active := stream.coder != nil
-				stream.mutex.Unlock()
-				if active {
-					m.inactive.Store(0)
-					break
+				// Check if any stream is active
+				for _, stream := range m.streams {
+					stream.mutex.Lock()
+					active := stream.coder != nil
+					stream.mutex.Unlock()
+					if active {
+						m.inactive.Store(0)
+						break
+					}
+				}
+
+				// Nothing done for 5 minutes
+				if m.inactive.Load() >= int32(m.c.ManagerIdleTime/5) {
+					t.Stop()
+					m.Destroy()
+					m.idle <- IdleEvent{ID: m.id, Generation: m.generation}
+					return
 				}
 			}
-
-			// Nothing done for 5 minutes
-			if m.inactive.Load() >= int32(m.c.ManagerIdleTime/5) {
-				t.Stop()
-				m.Destroy()
-				m.idle <- IdleEvent{ID: m.id, Generation: m.generation}
-				return
-			}
-		}
-	}()
+		}()
+	}
 
 	return m, nil
 }
 
 // Destroys streams. DOES NOT emit on the close channel.
 func (m *Manager) Destroy() {
-	log.Printf("%s: destroying manager", m.id)
-	m.inactive.Store(-1)
+	m.destroyOnce.Do(func() {
+		log.Printf("%s: destroying manager", m.id)
+		m.inactive.Store(-1)
 
-	for _, stream := range m.streams {
-		stream.Stop()
-	}
+		for _, stream := range m.streams {
+			stream.Stop()
+		}
 
-	// Delete temp dir
-	os.RemoveAll(m.tempDir)
+		// Delete temp dir
+		if err := os.RemoveAll(m.tempDir); err != nil {
+			log.Printf("%s: removing cache directory: %v", m.id, err)
+		}
+	})
 }
 
 func (m *Manager) Renditions() []Rendition {
@@ -454,6 +490,10 @@ func (m *Manager) HasStream(quality string) bool {
 }
 
 func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool {
+	return m.ServeChunkContext(context.Background(), w, quality, id)
+}
+
+func (m *Manager) ServeChunkContext(ctx context.Context, w http.ResponseWriter, quality string, id int) bool {
 	stream, ok := m.streams[quality]
 	if !ok {
 		return false
@@ -462,7 +502,9 @@ func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool
 		// Trigger the probe; on empty grid the stream re-encodes.
 		m.EnsureCopySegments()
 	}
-	stream.ServeChunk(w, id)
+	if err := stream.ServeChunkContext(ctx, w, id); err != nil {
+		log.Printf("%s: serving segment: %v", m.id, err)
+	}
 	return true
 }
 
@@ -482,21 +524,32 @@ func (m *Manager) ServeFullVideo(w http.ResponseWriter, r *http.Request, quality
 	}
 }
 
-func (m *Manager) ffprobe() error {
+func (m *Manager) ffprobe(ctx context.Context) error {
 	if probe, ok := LoadCachedProbe(m.c.CacheDir(), m.fileid, m.etag); ok {
 		log.Printf("%s: probe cache hit", m.id)
 		m.probe = probe
 	} else {
 		log.Printf("%s: probe cache miss", m.id)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if m.c.ProbeSlots != nil {
+			if !m.c.ProbeSlots.TryAcquire(1) {
+				return errors.New("probe budget busy")
+			}
+			defer m.c.ProbeSlots.Release(1)
+		}
+		timeout := 5 * time.Second
+		if m.c.ProbeTimeout > 0 {
+			timeout = m.c.ProbeTimeout
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		info, err := ffmpeg.Probe(ctx, m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+		info, err := ffmpeg.ProbeWithFormats(ctx, m.c.FFprobe, m.ffmpegInput(), m.inputHeaders(), m.c.InputFormats)
 		if err != nil {
 			return err
 		}
 
 		m.probe = &ProbeVideoData{
+			AudioOnly: info.AudioOnly,
 			Width:     info.Width,
 			Height:    info.Height,
 			Duration:  info.Duration,
