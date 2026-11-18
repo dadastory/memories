@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /** Helper function to add a wildcard parameter to the route */
-function w($base, $param)
+function w(array $base, string $param): array
 {
     return array_merge($base, [
         'requirements' => [$param => '.*'],
@@ -73,6 +73,7 @@ return [
         ['name' => 'Video#transcode', 'url' => '/api/video/transcode/{client}/{fileid}/{profile}', 'verb' => 'GET'],
         ['name' => 'Video#storyboard', 'url' => '/api/video/storyboard/{client}/{fileid}/{profile}', 'verb' => 'GET'],
         ['name' => 'Video#livephoto', 'url' => '/api/video/livephoto/{fileid}', 'verb' => 'GET'],
+        ['name' => 'Video#bridge', 'url' => '/api/video/bridge/{fileid}', 'verb' => 'GET'],
 
         ['name' => 'Download#request', 'url' => '/api/download', 'verb' => 'POST'],
         ['name' => 'Download#file', 'url' => '/api/download/{handle}', 'verb' => 'GET'],

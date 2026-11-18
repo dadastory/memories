@@ -57,7 +57,6 @@
           :class="{
             'app-outer': true,
             'router-outlet': true,
-            'has-nav': showNavigation,
             'is-native': native,
           }"
         >
@@ -67,6 +66,7 @@
                 :class="{
                   'route-view': true,
                   'route-view--map': slotRoute.name === 'map',
+                  'has-nav': showNavigation,
                 }"
                 :key="slotRoute.path"
               >
@@ -76,7 +76,9 @@
           </router-view>
         </div>
 
-        <MobileNav v-if="showNavigation" />
+        <RouteTransition :route-transition="`mobile-nav-${routeTransition}`">
+          <MobileNav v-if="showNavigation" />
+        </RouteTransition>
       </NcAppContent>
 
       <Settings v-model:open="settingsOpen" />
@@ -86,6 +88,17 @@
         <Sidebar />
       </Teleport>
     </template>
+
+    <!-- Server config failed to load and nothing is cached -->
+    <NcEmptyContent
+      v-else-if="configStatus.settled"
+      :name="t('memories', 'Failed to load configuration')"
+      :description="configStatus.error ?? undefined"
+    >
+      <template #action>
+        <NcButton @click="reloadWindow">{{ t('memories', 'Reload') }}</NcButton>
+      </template>
+    </NcEmptyContent>
 
     <EditMetadataModal />
     <AddToAlbumModal />
@@ -109,6 +122,8 @@ import NcContent from '@nextcloud/vue/components/NcContent';
 import NcAppContent from '@nextcloud/vue/components/NcAppContent';
 import NcAppNavigation from '@nextcloud/vue/components/NcAppNavigation';
 import NcAppNavigationItem from '@nextcloud/vue/components/NcAppNavigationItem';
+import NcEmptyContent from '@nextcloud/vue/components/NcEmptyContent';
+import NcButton from '@nextcloud/vue/components/NcButton';
 
 import { generateUrl } from '@nextcloud/router';
 import { useRouteIs } from '@services/route-is';
@@ -135,7 +150,8 @@ import SearchModal from '@components/modal/SearchModal.vue';
 import * as utils from '@services/utils/common';
 import * as nativex from '@native';
 import { translate as t } from '@services/l10n';
-import { config, hasVersionChanged } from '@services/user-config';
+import { uid } from '@services/utils/auth';
+import { config, configStatus, hasVersionChanged } from '@services/user-config';
 import { windowDims } from '@services/viewport';
 import { getPlayableVideoCodecs } from '@services/video/codec';
 
@@ -208,7 +224,7 @@ const facerecognition = computed((): string | false => {
 });
 
 const isFirstStart = computed((): boolean => {
-  return config.timeline_path === '_empty_' && !routeIs.Public && !route.query.noinit;
+  return !!uid && config.timeline_path === '_empty_' && !routeIs.Public && !route.query.noinit;
 });
 
 const isConfigUnknown = computed((): boolean => {
@@ -220,7 +236,7 @@ const showAlbums = computed((): boolean => {
 });
 
 const showNavigation = computed((): boolean => {
-  if (routeIs.Public || isFirstStart.value) {
+  if (!uid || routeIs.Public || isFirstStart.value) {
     return false;
   }
 
@@ -254,6 +270,9 @@ onMounted(() => {
   // Skip on nxsetup and firststart to avoid flashing white on initial setup.
   if (!routeIs.NxSetup && !isFirstStart.value) {
     nativex.setTheme();
+
+    // One-time prompt for media management grant.
+    void nativex.maybeAskManageMedia();
   }
 
   // Check for native interface
@@ -270,8 +289,7 @@ onMounted(() => {
 
 onBeforeMount(async () => {
   if ('serviceWorker' in navigator && !nativex.has()) {
-    // Use the window load event to keep the page load performant
-    window.addEventListener('load', async () => {
+    utils.onDOMLoaded(async () => {
       try {
         const url = generateUrl('/apps/memories/static/service-worker.js');
         const registration = await navigator.serviceWorker.register(url, {
@@ -396,6 +414,10 @@ function showSettings() {
   settingsOpen.value = true;
 }
 
+function reloadWindow() {
+  window.location.reload();
+}
+
 // https://github.com/pulsejet/memories/issues/1634
 function syncSharingToken(token?: string) {
   document.querySelector('input#sharingToken')?.remove();
@@ -417,6 +439,7 @@ function syncSharingToken(token?: string) {
   margin: 0;
 
   .route-view {
+    position: relative;
     height: 100%;
     width: 100%;
     box-sizing: border-box;

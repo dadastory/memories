@@ -10,6 +10,7 @@ use OCA\Memories\Settings\SystemConfig;
 use OCP\EventDispatcher\IEventDispatcher;
 use OCP\Files\Events\Node\NodeWrittenEvent;
 use OCP\Files\File;
+use Psr\Log\LoggerInterface;
 
 final class Exif
 {
@@ -22,8 +23,11 @@ final class Exif
     public const PANO_WIDE = 1; // maybe
     public const PANO_SPHERE = 2; // confirmed
 
-    private const FORBIDDEN_EDIT_MIMES = ['image/bmp', 'image/x-dcraw', 'video/MP2T']; // also update const.ts
+    /** @var list<string> */
+    private const FORBIDDEN_EDIT_MIMES = ['image/bmp', 'video/MP2T']; // also update const.ts
     private const EXIFTOOL_TIMEOUT = 30000;
+
+    /** @var list<string> */
     private const EXIFTOOL_ARGS = ['-api', 'QuickTimeUTC=1', '-api', 'LargeFileSupport=1', '-n', '-json'];
     private const INVALID_PATH_PATTERN = '/[\r\n\x00]/';
 
@@ -41,17 +45,18 @@ final class Exif
         private BinExt $binExt,
         private SystemConfig $systemConfig,
         private IEventDispatcher $eventDispatcher,
+        private LoggerInterface $logger,
     ) {}
 
     public function closeStaticExiftoolProc(): void
     {
         try {
             // Close I/O pipes
-            if ($this->staticPipes) {
-                fclose($this->staticPipes[0]);
-                fclose($this->staticPipes[1]);
-                fclose($this->staticPipes[2]);
+            if ($pipes = $this->staticPipes) {
                 $this->staticPipes = null;
+                foreach ($pipes as $pipe) {
+                    fclose($pipe);
+                }
             }
 
             // Close process
@@ -80,8 +85,8 @@ final class Exif
             $this->initializeStaticExiftoolProc();
             usleep(500000); // wait if error
 
-            if ($this->staticProc && !proc_get_status($this->staticProc)['running']) {
-                error_log('WARN: Failed to create stay_open exiftool process');
+            if (!$this->staticProc || !proc_get_status($this->staticProc)['running']) {
+                $this->logger->warning('Failed to create stay_open exiftool process', ['app' => Application::APPNAME]);
                 $this->noProc = true;
                 $this->staticProc = null;
                 $this->staticPipes = null;
@@ -366,31 +371,40 @@ final class Exif
         $this->assertValidLocalFile($path);
 
         $data['SourceFile'] = $path;
-        $raw = json_encode([$data], JSON_UNESCAPED_UNICODE);
         $cmd = array_merge($this->getExiftool(), [
             '-overwrite_original_in_place', '-n',
-            '-api', 'LargeFileSupport=1',
-            '-json=-', $path,
+            '-api', 'LargeFileSupport=1', '-json=-',
         ]);
 
+        if ($this->injectQuickTimeGps($data)) {
+            // The legacy 3GP LocationInformation (loci) tag takes precedence over
+            // GPSCoordinates when reading, so delete it in the same call.
+            // https://github.com/pulsejet/memories/issues/1757
+            $cmd[] = '-LocationInformation=';
+        }
+
+        // Operate directly on the local file.
+        $cmd[] = $path;
+
         try {
-            $output = Util::execSafe2($cmd, self::EXIFTOOL_TIMEOUT, $raw, true, true);
-            $stdout = $output[0];
-            $stderr = $output[1];
+            $raw = json_encode([$data], JSON_UNESCAPED_UNICODE);
+            $output = Util::execSafe2($cmd, self::EXIFTOOL_TIMEOUT, $raw, [1, 2]);
+            $stdout = $output[1];
+            $stderr = $output[2];
         } catch (\Exception $ex) {
-            error_log("Timeout reading from exiftool: [{$path}]");
+            $this->logger->error("Timeout reading from exiftool: [{$path}]", ['app' => Application::APPNAME]);
 
             throw $ex;
         }
 
         if (null !== $stderr && str_contains($stderr, 'Error')) {
-            error_log("Exiftool error: {$stderr}");
+            $this->logger->error("Exiftool error: {$stderr}", ['app' => Application::APPNAME]);
 
             throw new \Exception('Could not set exif data: '.$stderr);
         }
         if (null === $stdout || str_contains($stdout, 'Error')) {
             $stdout ??= $stderr ?? 'Error: Unknown cmd fail';
-            error_log("Exiftool error: {$stdout}");
+            $this->logger->error("Exiftool error: {$stdout}", ['app' => Application::APPNAME]);
 
             throw new \Exception('Could not set exif data: '.$stdout);
         }
@@ -467,12 +481,13 @@ final class Exif
         try {
             return Util::execSafe($cmd, self::EXIFTOOL_TIMEOUT) ?? '';
         } catch (\Exception $ex) {
-            error_log("Timeout reading from exiftool: [{$path}]");
+            $this->logger->error("Timeout reading from exiftool: [{$path}]", ['app' => Application::APPNAME]);
 
             throw $ex;
         }
     }
 
+    /** @return list<string> */
     private function getExiftool(): array
     {
         return $this->binExt->getExiftool();
@@ -488,9 +503,16 @@ final class Exif
         $proc = proc_open(array_merge($this->getExiftool(), ['-stay_open', 'true', '-@', '-']), [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
+            2 => ['null'], // undrained pipe would block exiftool
         ], $this->staticPipes);
-        $this->staticProc = \is_resource($proc) ? $proc : null;
+
+        if (!\is_resource($proc)) {
+            $this->staticPipes = null;
+
+            return;
+        }
+
+        $this->staticProc = $proc;
         stream_set_blocking($this->staticPipes[1], false);
     }
 
@@ -524,13 +546,17 @@ final class Exif
 
             return $this->processStdout($buf);
         } catch (\Exception) {
-            error_log("ERROR: Exiftool may have crashed, restarting process [{$path}]");
+            $this->logger->error("Exiftool may have crashed, restarting process [{$path}]", ['app' => Application::APPNAME]);
             $this->restartStaticExiftoolProc();
 
             throw new \Exception('Nothing to read from Exiftool');
         }
     }
 
+    /**
+     * @param string       $path      the local file path to read EXIF data from
+     * @param list<string> $extraArgs additional arguments to pass to exiftool
+     */
     private function getExifFromLocalPathWithSeparateProc(string $path, array $extraArgs = []): array
     {
         $cmd = array_merge($this->getExiftool(), self::EXIFTOOL_ARGS, $extraArgs, [$path]);
@@ -538,7 +564,7 @@ final class Exif
         try {
             $stdout = Util::execSafe($cmd, self::EXIFTOOL_TIMEOUT) ?? '';
         } catch (\Exception $ex) {
-            error_log("Timeout reading from exiftool: [{$path}]");
+            $this->logger->error("Timeout reading from exiftool: [{$path}]", ['app' => Application::APPNAME]);
 
             throw $ex;
         }
@@ -600,5 +626,37 @@ final class Exif
         if (!is_file($path) || !is_readable($path)) {
             throw new \Exception("File is not readable: {$path}");
         }
+    }
+
+    /**
+     * Mirror GPS coordinates to QuickTime locations for video files.
+     *
+     * Bare GPSLatitude/GPSLongitude writes go to XMP for MP4/MOV, which is
+     * ignored by the Composite GPS tags in favor of QuickTime:GPSCoordinates.
+     * Inject ISO6709 GPSCoordinates for all QuickTime locations so the edit
+     * is visible on re-read. Harmless for non-QuickTime files (ignored).
+     *
+     * @param array<string, mixed> $data exif data (modified in place)
+     *
+     * @return bool true if valid coordinates were found and injected
+     */
+    private function injectQuickTimeGps(array &$data): bool
+    {
+        $lat = filter_var($data['GPSLatitude'] ?? null, FILTER_VALIDATE_FLOAT);
+        $lon = filter_var($data['GPSLongitude'] ?? null, FILTER_VALIDATE_FLOAT);
+        if (false === $lat || false === $lon) {
+            return false;
+        }
+        if (abs($lat) > 90 || abs($lon) > 180) {
+            return false;
+        }
+
+        // ISO6709, e.g. +48.858844+002.294351/
+        $iso = \sprintf('%+.6f%+.6f/', $lat, $lon);
+        $data['Keys:GPSCoordinates'] = $iso;
+        $data['UserData:GPSCoordinates'] = $iso;
+        $data['ItemList:GPSCoordinates'] = $iso;
+
+        return true;
     }
 }

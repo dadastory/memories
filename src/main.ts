@@ -1,4 +1,5 @@
 import './bootstrap';
+import '@components/custom-elements';
 
 import { createApp } from 'vue';
 import App from './App.vue';
@@ -30,6 +31,16 @@ app.use(router);
 // Initialize NativeX globals
 nativex.initialize();
 
-app.mount('#content');
+void (async function mount() {
+  try {
+    // Mount after router is ready, so that the initial
+    // navigation is complete and the route is properly set.
+    await router.isReady();
+  } catch (error) {
+    console.error('Initial navigation failed', error);
+  }
+
+  app.mount('#content');
+})();
 
 export default app;

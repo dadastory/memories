@@ -1,10 +1,7 @@
-import { test, expect } from '@playwright/test';
-import { appUrl, bootstrap, e2eHeaders, teardown, username } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, username, openViewer } from './navigation';
 import { DavClient } from './utils';
 import { snap } from './screenshots';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({ extraHTTPHeaders: e2eHeaders() });
 
@@ -36,8 +33,7 @@ test.describe('@ui Sidebar', () => {
 
   test('Timeline viewer opens native sidebar with sharing tab', async ({ page }) => {
     await page.goto(appUrl);
-    await page.locator(`.p-outer--${fileid} > .img-outer`).click();
-    await page.waitForSelector('.memories-viewer.fully-opened');
+    await openViewer(page, fileid);
 
     await page.getByRole('button', { name: 'Info', exact: true }).click();
     const sidebar = page.locator('#app-sidebar-native');
@@ -60,7 +56,7 @@ test.describe('@ui Sidebar', () => {
 
   test('Album viewer opens reduced sidebar', async ({ page }) => {
     await page.goto(`${appUrl}/albums/${username}/${encodeURIComponent(albumName)}`);
-    await page.locator('.p-outer > .img-outer').first().click();
+    await page.locator('.p-outer:not(.placeholder) > .img-outer').first().click();
     await page.waitForSelector('.memories-viewer.fully-opened');
 
     await page.getByRole('button', { name: 'Info', exact: true }).click();

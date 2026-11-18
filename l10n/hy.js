@@ -33,7 +33,7 @@ OC.L10N.register(
     "Upload failed" : "Բեռնումն ձախողվեց",
     "Download {ext}" : "Ներբեռնել {ext}",
     "Previous" : "Նախորդ",
-    "Size" : "Չափս",
+    "Play" : "Նվագարկել",
     "Yes" : "Այո",
     "No" : "Ոչ",
     "Choose" : "Ընտրել"

@@ -1,11 +1,8 @@
-import { test, expect, devices } from '@playwright/test';
-import type { Page } from '@playwright/test';
-import { appUrl, bootstrap, e2eHeaders, teardown } from './navigation';
+import { expect, devices } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
+import { test, appUrl, e2eHeaders, selectPhoto } from './navigation';
 import { DavClient } from './utils';
 import { snap } from './screenshots';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({
   extraHTTPHeaders: e2eHeaders({
@@ -28,11 +25,12 @@ test.describe('@ui Photo selection', () => {
     'for-geo-096.jpg',
     'for-geo-095.jpg',
   ];
-  const ids: number[] = [];
+  let ids: number[];
   let lastId: number;
 
   test.beforeAll(async ({ request }) => {
     const dav = new DavClient(request);
+    ids = [];
     for (const name of ordered) {
       ids.push(await dav.fileid(`/for-geo/${name}`));
     }
@@ -108,12 +106,15 @@ test.describe('@ui Photo selection', () => {
 
       // Scroll smoothly right to the end so every day in between loads.
       const lastSelector = `.p-outer--${lastId}`;
-      for (let i = 0; i < 10; i++) {
-        if ((await page.locator(lastSelector).count()) > 0) break;
-        await page.mouse.wheel(0, 1500);
-        await page.waitForTimeout(50); // let placeholder attach
-        await expect(page.locator('.p-outer.placeholder')).toHaveCount(0);
-      }
+      await expect(async () => {
+        const count = await page.locator(lastSelector).count();
+        if (count === 0) {
+          await page.mouse.wheel(0, 1500);
+          await page.waitForTimeout(50); // let placeholder attach
+          await expect(page.locator('.p-outer.placeholder')).toHaveCount(0);
+        }
+        expect(count).toBeGreaterThan(0);
+      }).toPass({ intervals: [0], timeout: 30_000 });
       await expect(page.locator(lastSelector)).toBeVisible();
 
       await page.keyboard.down('Shift');
@@ -122,7 +123,7 @@ test.describe('@ui Photo selection', () => {
 
       // Everything from the 2nd image down to the last: 99 photos.
       // Detached rows are not in the DOM, so only the top bar count is asserted.
-      await expect(page.locator('.memories-top-bar .text')).toContainText('99 selected');
+      await expect(page.locator('.memories-top-bar .text')).toHaveText('99 selected');
       await page.waitForTimeout(200); // animation
       await snap(page, 'selection-all', step);
     });
@@ -156,11 +157,11 @@ test.describe('@ui Photo selection', () => {
         await expect(photo).not.toHaveClass(/selected/);
       }
     }
-    await expect(page.locator('.p-outer.selected')).toHaveCount(selected.filter(Boolean).length);
+    await expect(page.locator('.p-outer.selected:visible')).toHaveCount(selected.filter(Boolean).length);
 
     const count = selected.filter(Boolean).length;
     if (count > 0) {
-      await expect(page.locator('.memories-top-bar .text')).toContainText(`${count} selected`);
+      await expect(page.locator('.memories-top-bar .text')).toHaveText(`${count} selected`);
     } else {
       await expect(page.locator('.memories-top-bar')).toHaveCount(0);
     }
@@ -173,7 +174,7 @@ test.describe('@ui Photo selection', () => {
     // the recycler and detaches them again.
     const selectors = ids.map((id) => `.p-outer--${id}`);
     await page.locator(selectors[2]).scrollIntoViewIfNeeded();
-    await page.waitForFunction((sels) => sels.every((s) => !!document.querySelector(s)), selectors);
+    await expect(page.locator(selectors.join(', '))).toHaveCount(selectors.length, { timeout: 30000 });
     for (const selector of selectors) {
       await expect(page.locator(selector)).toBeVisible();
     }
@@ -181,8 +182,7 @@ test.describe('@ui Photo selection', () => {
 
   async function checkIcon(page: Page, i: number) {
     // The check icon is only displayed on hover, like for a real user.
-    await page.locator(`.p-outer--${ids[i]}`).hover();
-    await page.locator(`.p-outer--${ids[i]} .select`).click();
+    await selectPhoto(page, ids[i]);
   }
 });
 
@@ -221,13 +221,7 @@ test.describe('@ui Photo selection touch', () => {
 
     // Rows can still reflow (briefly detaching elements), so wait for a box
     // instead of trusting a single measurement.
-    let box = await firstImg.boundingBox();
-    for (let i = 0; i < 100 && !box; i++) {
-      await page.waitForTimeout(100);
-      box = await firstImg.boundingBox();
-    }
-    expect(box, 'first image should have a bounding box').not.toBeNull();
-    const rect = box!;
+    const rect = await settledBox(firstImg);
     const x = rect.x + rect.width / 2;
     const height = page.viewportSize()!.height;
     const countText = page.locator('.memories-top-bar .text');
@@ -242,7 +236,7 @@ test.describe('@ui Photo selection touch', () => {
 
     await test.step('Touch and hold selects one image', async (step) => {
       await touch('touchStart', x, rect.y + rect.height / 2);
-      await expect(countText).toContainText('1 selected', { timeout: 15000 });
+      await expect(countText).toHaveText('1 selected', { timeout: 15000 });
       await page.waitForTimeout(200); // animation
       await snap(page, 'selection-touch-hold', step);
     });
@@ -252,51 +246,41 @@ test.describe('@ui Photo selection touch', () => {
       // the page keeps scrolling and selecting by itself.
       await touch('touchMove', x, height - 30);
 
-      for (let i = 0; i < 120; i++) {
-        const text = await countText.textContent();
-        if (text?.includes('94 selected')) break;
-        if (i === 5) {
+      let attempts = 0;
+      await expect(async () => {
+        if (attempts++ === 5) {
           await snap(page, 'selection-touch-mid', step);
         }
         await touch('touchMove', x, height - 30);
-        await page.waitForTimeout(400);
-      }
-      await expect(countText).toContainText('94 selected');
-      await page.waitForTimeout(200); // animation
-      await snap(page, 'selection-touch-drag', step);
+        await expect(countText).toHaveText('94 selected', { timeout: 400 });
+      }).toPass({ intervals: [0], timeout: 60_000 });
     });
 
     await test.step('Move up without lifting deselects in between', async (step) => {
       // Park the finger mid-screen (no scroll zone); the held touch
       // stays active and for-geo-010 is already rendered just above.
       await touch('touchMove', x, 400);
-      const sel010 = `.p-outer--${id010}`;
+      const img010 = page.locator(`.p-outer--${id010} .img-outer`);
 
       // Walk the finger to for-geo-010, reconverging if auto-scroll moves it.
-      for (let i = 0; i < 4; i++) {
-        const target = await page.locator(`${sel010} .img-outer`).boundingBox();
-        if (!target) break;
-        const ty = target.y + target.height / 2;
-        await touch('touchMove', x, ty);
-        await page.waitForTimeout(300);
-        const fresh = await page.locator(`${sel010} .img-outer`).boundingBox();
-        if (fresh && Math.abs(fresh.y + fresh.height / 2 - ty) < 40) break;
-      }
-
       // for-geo-007/008/009 above for-geo-010 are deselected again.
-      await expect(countText).toContainText('91 selected');
-      await page.waitForTimeout(200); // animation
-      await snap(page, 'selection-touch-shrink', step);
+      await expect(async () => {
+        const target = await settledBox(img010);
+        await touch('touchMove', x, target.y + target.height / 2);
+        await expect(countText).toHaveText('91 selected', { timeout: 300 });
+      }).toPass({ intervals: [0], timeout: 15_000 });
 
       await touch('touchEnd', 0, 0);
-      await expect(countText).toContainText('91 selected');
+      await expect(countText).toHaveText('91 selected');
+      await page.waitForTimeout(200); // animation
+      await snap(page, 'selection-touch-shrink', step);
     });
 
     await test.step('Tap toggles single photos', async (step) => {
       // for-geo-006 is outside the range: tapping selects it.
       await tapPhoto(page, id006);
       await expect(page.locator(`.p-outer--${id006}`)).toHaveClass(/selected/);
-      await expect(countText).toContainText('92 selected');
+      await expect(countText).toHaveText('92 selected');
       await page.waitForTimeout(200); // animation
       await snap(page, 'selection-touch-tap-on', step);
 
@@ -304,7 +288,7 @@ test.describe('@ui Photo selection touch', () => {
       await tapPhoto(page, id010);
       await expect(page.locator(`.p-outer--${id010}`)).not.toHaveClass(/selected/);
       await expect(page.locator(`.p-outer--${id006}`)).toHaveClass(/selected/);
-      await expect(countText).toContainText('91 selected');
+      await expect(countText).toHaveText('91 selected');
       await page.waitForTimeout(200); // animation
       await snap(page, 'selection-touch-tap-off', step);
     });
@@ -314,13 +298,13 @@ test.describe('@ui Photo selection touch', () => {
       // every row and reuse its DOM elements for other photos.
       // for-geo-097 renders at the top; it must still be selected,
       // proving selection lives on the photo objects, not the elements.
-      await page.evaluate(() => {
-        document.querySelector('.recycler')!.scrollTop = 0;
+      await page.locator('.recycler').evaluate((el) => {
+        el.scrollTop = 0;
       });
       const sel097 = `.p-outer--${id097}`;
       await expect(page.locator(sel097)).toBeVisible();
       await expect(page.locator(sel097)).toHaveClass(/selected/);
-      await expect(countText).toContainText('91 selected');
+      await expect(countText).toHaveText('91 selected');
       await page.waitForTimeout(200); // animation
       await snap(page, 'selection-touch-recycled', step);
     });
@@ -333,12 +317,14 @@ test.describe('@ui Photo selection touch', () => {
     await target.scrollIntoViewIfNeeded();
     // Touches right after a recycler scroll are ignored for 200ms.
     await page.waitForTimeout(400);
-    let box = await target.boundingBox();
-    for (let i = 0; i < 100 && !box; i++) {
-      await page.waitForTimeout(100);
-      box = await target.boundingBox();
-    }
-    expect(box, 'tapped photo should have a bounding box').not.toBeNull();
-    await page.touchscreen.tap(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const box = await settledBox(target);
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
   }
 });
+
+// Rows can reflow and briefly detach, so wait until the element has a box.
+async function settledBox(target: Locator) {
+  let box = await target.boundingBox();
+  await expect.poll(async () => (box = await target.boundingBox())).not.toBeNull();
+  return box!;
+}

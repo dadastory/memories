@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\Memories\Db;
 
 use OCA\Memories\ClustersBackend;
+use OCA\Memories\Exceptions;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 
 /**
@@ -39,9 +40,14 @@ trait TimelineQueryDays
     ): array {
         $query = $this->connection->getQueryBuilder();
 
+        // DISTINCT is only needed when transforms add 1:N joins
+        $count = empty($queryTransforms)
+            ? $query->func()->count('m.fileid')
+            : $query->func()->count(SQL::distinct($query, 'm.fileid'));
+
         // Get all entries also present in filecache
         $query->select('m.dayid')
-            ->selectAlias($query->func()->count(SQL::distinct($query, 'm.fileid')), 'count')
+            ->selectAlias($count, 'count')
             ->from('memories', 'm')
         ;
 
@@ -219,7 +225,7 @@ trait TimelineQueryDays
             // This is illegal in most cases except albums,
             // which don't have a folder associated.
             if (!$this->_rootEmptyAllowed) {
-                throw new \Exception('No valid root folder found (.nomedia?)');
+                throw Exceptions::NotFound('No valid root folder found');
             }
 
             // Nothing to do here

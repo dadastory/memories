@@ -11,8 +11,11 @@ patch-external:
 php-init:
 	composer install
 
-php-lint:
-	vendor/bin/php-cs-fixer fix
+php-format:
+	vendor/bin/php-cs-fixer fix --quiet
+
+php-format-check:
+	vendor/bin/php-cs-fixer fix --dry-run --diff
 
 psalm:
 	vendor/bin/psalm --no-cache --show-info=true
@@ -20,30 +23,43 @@ psalm:
 php-test:
 	vendor/bin/phpunit
 
-.PHONY: php-lint psalm php-test
+.PHONY: php-format php-format-check psalm php-test
 
 # 3. Vue
 js-init:
 	npm ci
+	bash scripts/patch-external.sh
 
 js-lint:
-	npx vue-tsc --noEmit --skipLibCheck
+	npx vue-tsc --noEmit
+
+PRETTIER_PATHS = src e2e scripts/*.ts webpack*.ts playwright.config.ts
+
+js-format:
+	npx prettier --write --log-level=warn $(PRETTIER_PATHS)
+
+js-format-check:
+	npx prettier --check $(PRETTIER_PATHS)
 
 build-js:
 	npm run dev
 
 build-js-production:
-	rm -f js/* && npm run build
+	npm run build
 
 watch-js:
 	npm run watch
 
-.PHONY: js-lint build-js build-js-production watch-js
+.PHONY: js-lint js-format js-format-check build-js build-js-production watch-js
 
 # 4. Lint
-lint: php-lint psalm js-lint
+format: php-format js-format
 
-.PHONY: lint
+format-check: php-format-check js-format-check
+
+lint: format psalm js-lint
+
+.PHONY: format format-check lint
 
 # 5. E2E
 e2e:

@@ -1,6 +1,8 @@
 package gallery.memories
 
+import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
@@ -8,15 +10,14 @@ import android.view.SoundEffectConstants
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceResponse
 import android.widget.Toast
-import androidx.media3.common.util.UnstableApi
 import gallery.memories.app.di.AppContainer
 import gallery.memories.bridge.BridgeResponses
+import gallery.memories.data.remote.http.ClientCertificateKeyManager
 import gallery.memories.share.DownloadNotifier
 import gallery.memories.share.ShareManager
 import org.json.JSONArray
 import java.io.ByteArrayInputStream
 
-@UnstableApi
 /**
  * Injected into the WebView as `nativex`: sync calls below plus the localhost
  * bridge (fetch /api/… and /image/… against 127.0.0.1).
@@ -24,8 +25,14 @@ import java.io.ByteArrayInputStream
 class NativeX(private val mCtx: MainActivity) {
     private var themeStored = false
 
-    val container = AppContainer(mCtx, bridge = { method, url -> handleBridge(method, url) }, onAllowMedia = { doMediaSync(true) })
+    /** Application container to bridge API calls. */
+    val container = AppContainer(
+        activity = mCtx,
+        bridge = { method, url -> handleBridge(method, url) },
+        onAllowMedia = { doMediaSync(true) },
+    )
 
+    /** Expose various services from the container. */
     val timeline get() = container.timeline
     val image get() = container.image
     val auth get() = container.auth
@@ -36,25 +43,36 @@ class NativeX(private val mCtx: MainActivity) {
     val router get() = container.router
     val share: ShareManager get() = container.share
 
+    /** Async listener for NativeX fire-and-forget interactions */
+    private val asyncListener = NativeXAsync(mCtx, this)
+
     init {
         shareManager = container.share
     }
 
     companion object {
         /**
-         * Latest live [ShareManager], for the manifest-registered download receiver
-         * which cannot receive it via intent. Nulled in [destroy].
+         * Latest live [ShareManager] for in-process downloads via [downloadFromUrl].
+         * Nulled in [destroy].
          */
         var shareManager: ShareManager? = null
         val TAG: String = NativeX::class.java.simpleName
     }
 
     fun destroy() {
+        local.stop()
+        permissions.destroy()
+        container.deleter.destroy()
+        detachAsyncMessages()
         shareManager = null
         account.onDestroy()
-        local.stop()
+        container.holeVideo.release()
         timeline.destroy()
     }
+
+    /** Fire-and-forget `nativex_async` WebMessage bridge. See [NativeXAsync]. */
+    fun attachAsyncMessages() = asyncListener.attach()
+    fun detachAsyncMessages() = asyncListener.detach()
 
     /** Bridge path patterns. Must stay in sync with the @regex docs in src/native/api.ts. */
     object API {
@@ -68,8 +86,11 @@ class NativeX(private val mCtx: MainActivity) {
         val VIDEO_FULL = Regex("^/video/full/\\d+$")
         val SHARE_URL = Regex("^/api/share/url/.+$")
         val SHARE_BLOB = Regex("^/api/share/blobs$")
+        val VIEW_IMAGE = Regex("^/api/view/image$")
+        val VIEW_IMAGE_LOCAL = Regex("^/api/view/image/local$")
         val UPLOAD_LOCAL = Regex("^/api/upload/local$")
         val CONFIG_ALLOW_MEDIA = Regex("^/api/config/allow_media/\\d+$")
+        val CONFIG_ALLOW_MANAGE_MEDIA = Regex("^/api/config/allow_manage_media$")
         val ASSETS_PROGRESS = Regex("^/api/assets/progress$")
     }
 
@@ -77,7 +98,24 @@ class NativeX(private val mCtx: MainActivity) {
     fun isNative(): Boolean = true
 
     @JavascriptInterface
+    fun getClientCertPrompts(): Int = ClientCertificateKeyManager.prompts
+
+    @JavascriptInterface
     fun getPlatform(): String = "android"
+
+    /** Bootstraps a fresh page session on the native side. */
+    @JavascriptInterface
+    fun bootstrap() {
+        mCtx.runOnUiThread {
+            container.holeImage.show(false)
+            container.holeVideo.release()
+            container.holeImage.resetSequence()
+        }
+    }
+
+    /** No-op for feature detection; real registration happens via [NativeXAsync]. */
+    @JavascriptInterface
+    fun setupEventBus() = Unit
 
     /** Persists the theme once per login, then just applies it. */
     @JavascriptInterface
@@ -92,6 +130,60 @@ class NativeX(private val mCtx: MainActivity) {
     @JavascriptInterface
     fun playTouchSound() {
         mCtx.runOnUiThread { mCtx.binding.webview.playSoundEffect(SoundEffectConstants.CLICK) }
+    }
+
+    /**
+     * Toggle HDR rendering for the activity window; off restores the default.
+     * Only on Ultra HDR displays (API 34+); the legacy FP16 path breaks some HWCs (#1796).
+     */
+    @JavascriptInterface
+    fun setHdrColorMode(enabled: Boolean) {
+        val hasHdr = Build.VERSION.SDK_INT >= 34
+            && mCtx.display?.isHdrSdrRatioAvailable == true
+        mCtx.runOnUiThread {
+            val mode = if (hasHdr && enabled) ActivityInfo.COLOR_MODE_HDR
+                else ActivityInfo.COLOR_MODE_DEFAULT
+            if (mCtx.window.colorMode != mode) {
+                mCtx.window.colorMode = mode
+            }
+        }
+    }
+
+    /** Show/hide the native image below the WebView. */
+    @JavascriptInterface
+    fun showNativeImage(show: Boolean) {
+        mCtx.runOnUiThread { container.holeImage.show(show) }
+    }
+
+    /** Move/resize the native image to the hole box (CSS px, may extend past the viewport). */
+    @JavascriptInterface
+    fun setNativeImageRect(x: Float, y: Float, w: Float, h: Float) {
+        mCtx.runOnUiThread { container.holeImage.setRect(x, y, w, h) }
+    }
+
+    /** Animate the native image to the hole box over [duration] ms. */
+    @JavascriptInterface
+    fun setNativeImageRectTransition(x: Float, y: Float, w: Float, h: Float, duration: Long) {
+        mCtx.runOnUiThread { container.holeImage.setRect(x, y, w, h, duration) }
+    }
+
+    /** Show/hide the native video below the WebView. */
+    @JavascriptInterface
+    fun showNativeVideo(show: Boolean) {
+        mCtx.runOnUiThread { container.holeVideo.show(show) }
+    }
+
+    /** Move/resize the native video to the hole box (CSS px, may extend past the viewport). */
+    @JavascriptInterface
+    fun setNativeVideoRect(x: Float, y: Float, w: Float, h: Float) {
+        mCtx.runOnUiThread { container.holeVideo.setRect(x, y, w, h) }
+    }
+
+    /** Forwards one hole video control command; demuxed in [NativeHoleVideo]. */
+    @JavascriptInterface
+    fun nativeVideoCommand(json: String?) {
+        if (json == null) return
+        mCtx.runOnUiThread { container.holeVideo.handleCommand(json) }
     }
 
     @JavascriptInterface
@@ -119,12 +211,13 @@ class NativeX(private val mCtx: MainActivity) {
     /** Reloads whatever [MainActivity.loadDefaultUrl] resolves to (app or welcome). */
     @JavascriptInterface
     fun reload() {
-        mCtx.runOnUiThread { mCtx.loadDefaultUrl() }
+        mCtx.runOnUiIfAlive { mCtx.loadDefaultUrl() }
     }
 
     /** Downloads a file in-process with the app's own client. Notifies on completion. Nulls are ignored. */
+    @JvmOverloads
     @JavascriptInterface
-    fun downloadFromUrl(url: String?, filename: String?, title: String?) {
+    fun downloadFromUrl(url: String?, filename: String?, title: String? = null) {
         if (url == null) return
         mCtx.threadPool.submit {
             try {
@@ -156,34 +249,6 @@ class NativeX(private val mCtx: MainActivity) {
         shareManager?.setShareBlobs(JSONArray(objects))
     }
 
-    /** Backwards-compatible alias of [playVideo2] without looping. */
-    @JavascriptInterface
-    fun playVideo(auid: String, fileid: Long, urlsArray: String) {
-        this.playVideo2(auid, fileid, urlsArray, false)
-    }
-
-    /** Plays the on-device copy when indexed, else the provided remote URLs. */
-    @JavascriptInterface
-    fun playVideo2(auid: String, fileid: Long, urlsArray: String, loop: Boolean = false) {
-        mCtx.threadPool.submit {
-            val urls = JSONArray(urlsArray)
-            val list = Array(urls.length()) { Uri.parse(urls.getString(it)) }
-            val videos = timeline.getSystemImagesByAUIDs(arrayListOf(auid))
-            mCtx.runOnUiThread {
-                if (videos.isNotEmpty()) {
-                    mCtx.initializePlayer(arrayOf(videos[0].uri), fileid, loop)
-                } else {
-                    mCtx.initializePlayer(list, fileid, loop)
-                }
-            }
-        }
-    }
-
-    @JavascriptInterface
-    fun destroyVideo(fileid: Long) {
-        mCtx.runOnUiThread { mCtx.destroyPlayer(fileid) }
-    }
-
     /** Persists the folder selection from the setup UI. */
     @JavascriptInterface
     fun configSetLocalFolders(json: String?) {
@@ -199,6 +264,14 @@ class NativeX(private val mCtx: MainActivity) {
     @JavascriptInterface
     fun configHasMediaPermission(): Boolean =
         permissions.hasAllowMedia() && permissions.hasMediaPermission()
+
+    /** True when silent local delete is allowed (no OS prompt). */
+    @JavascriptInterface
+    fun canManageMedia(): Boolean = permissions.canManageMedia()
+
+    /** Playable video codecs, probed by the hole video player. */
+    @JavascriptInterface
+    fun getPlayableVideoCodecs(): String = container.holeVideo.getPlayableVideoCodecs()
 
     /** Indexed-file count, or -1 when no sync is running. */
     @JavascriptInterface
@@ -219,9 +292,10 @@ class NativeX(private val mCtx: MainActivity) {
         }
     }
 
-    /** Serves one bridge request. GET-only; failures become 500, images get week-long caching. */
+    /** Serves one bridge request. GET-only; failures become 500, successful images get week-long caching. */
     fun handleBridge(method: String, url: Uri): WebResourceResponse {
         val path = url.path ?: return BridgeResponses.error()
+        if (mCtx.isDestroyed) return BridgeResponses.error("activity destroyed")
         val response = try {
             when (method) {
                 "GET" -> router.routerGet(url)
@@ -232,14 +306,14 @@ class NativeX(private val mCtx: MainActivity) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "handleBridge: $method $path failed", e)
-            BridgeResponses.error()
+            BridgeResponses.error(e.message)
         }
         // Merge CORS headers so any headers set by the route survive.
         val headers = (response.responseHeaders ?: emptyMap()).toMutableMap()
         headers["Access-Control-Allow-Origin"] = "*"
         headers["Access-Control-Allow-Headers"] = "*"
         response.responseHeaders = headers
-        if (path.matches(API.IMAGE_PREVIEW) || path.matches(API.IMAGE_FULL)) {
+        if (response.statusCode == 200 && (path.matches(API.IMAGE_PREVIEW) || path.matches(API.IMAGE_FULL))) {
             response.responseHeaders["Cache-Control"] = "max-age=604800"
         }
         return response

@@ -1,11 +1,8 @@
-import { test, expect } from '@playwright/test';
-import { bootstrap, teardown, appUrl, e2eHeaders, psub } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, psub, selectPhoto } from './navigation';
 import { DavClient } from './utils';
 
 import type { IPhoto } from '@typings';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({
   extraHTTPHeaders: e2eHeaders({
@@ -107,21 +104,23 @@ test.describe('Archive', () => {
       await test.step('Archive files', async () => {
         await page.goto(appUrl);
 
-        await page.hover(`.p-outer--${fileid1}`);
-        await page.locator(`.p-outer--${fileid1} > div.select`).click();
-        await page.hover(`.p-outer--${fileid2}`);
-        await page.locator(`.p-outer--${fileid2} > div.select`).click();
+        await selectPhoto(page, fileid1);
+        await selectPhoto(page, fileid2);
 
         await page.getByRole('button', { name: 'Actions' }).click();
         await page.getByRole('menuitem', { name: 'Archive' }).click();
 
-        await expect(page.locator(`.p-outer--${fileid1}`)).toHaveCount(0);
-        await expect(page.locator(`.p-outer--${fileid2}`)).toHaveCount(0);
+        await expect(page.locator(`.p-outer--${fileid1}:visible`)).toHaveCount(0);
+        await expect(page.locator(`.p-outer--${fileid2}:visible`)).toHaveCount(0);
       });
 
       await test.step('Verify files are in archive', async () => {
-        expect((await dav.imageInfo(fileid1, { basic: '1' })).filename?.includes('.archive/')).toBeTruthy();
-        expect((await dav.imageInfo(fileid2, { basic: '1' })).filename?.includes('.archive/')).toBeTruthy();
+        expect((await dav.imageInfo(fileid1, { basic: '1' })).filename).toBe(
+          psub('/for-archive-%wid/.archive/ui_test_01.jpg'),
+        );
+        expect((await dav.imageInfo(fileid2, { basic: '1' })).filename).toBe(
+          psub('/for-archive-%wid/.archive/ui_test_02.jpg'),
+        );
       });
     });
 
@@ -129,21 +128,19 @@ test.describe('Archive', () => {
       await test.step('Submit', async () => {
         await page.goto(`${appUrl}/archive`);
 
-        await page.hover(`.p-outer--${fileid1}`);
-        await page.locator(`.p-outer--${fileid1} > div.select`).click();
-        await page.hover(`.p-outer--${fileid2}`);
-        await page.locator(`.p-outer--${fileid2} > div.select`).click();
+        await selectPhoto(page, fileid1);
+        await selectPhoto(page, fileid2);
 
         await page.getByRole('button', { name: 'Actions' }).click();
         await page.getByRole('menuitem', { name: 'Unarchive' }).click();
 
-        await expect(page.locator(`.p-outer--${fileid1}`)).toHaveCount(0);
-        await expect(page.locator(`.p-outer--${fileid2}`)).toHaveCount(0);
+        await expect(page.locator(`.p-outer--${fileid1}:visible`)).toHaveCount(0);
+        await expect(page.locator(`.p-outer--${fileid2}:visible`)).toHaveCount(0);
       });
 
       await test.step('Verify files are back in main', async () => {
-        expect((await dav.imageInfo(fileid1, { basic: '1' })).filename?.includes('.archive/')).toBeFalsy();
-        expect((await dav.imageInfo(fileid2, { basic: '1' })).filename?.includes('.archive/')).toBeFalsy();
+        expect((await dav.imageInfo(fileid1, { basic: '1' })).filename).toBe(psub('/for-archive-%wid/ui_test_01.jpg'));
+        expect((await dav.imageInfo(fileid2, { basic: '1' })).filename).toBe(psub('/for-archive-%wid/ui_test_02.jpg'));
       });
     });
   });

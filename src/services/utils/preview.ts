@@ -4,7 +4,7 @@ import type { RouteLocationNormalized } from 'vue-router';
 import { API } from '@services/API';
 import { NAPI } from '@native/api';
 
-import { isLikelySamePhoto, isLocalPhoto } from './photo';
+import { isLocalPhoto } from './photo';
 
 import type { IConfig, IPhoto } from '@typings';
 
@@ -51,7 +51,8 @@ export function getPreviewUrl(opts: PreviewOptsSize | PreviewOptsMsize | Preview
   if (square) size = sqsize as any;
 
   // Screen-appropriate size
-  if (size === 'screen') {
+  const sizeIsMax = size === 'screen';
+  if (sizeIsMax) {
     const sw = Math.floor(screen.width * devicePixelRatio);
     const sh = Math.floor(screen.height * devicePixelRatio);
     const longEdge = Math.max(sw, sh);
@@ -60,13 +61,11 @@ export function getPreviewUrl(opts: PreviewOptsSize | PreviewOptsMsize | Preview
     // Use capped full image if NativeX is used
     if (isLocalPhoto(photo)) {
       return API.Q(NAPI.IMAGE_FULL(photo.auid!), { size: longEdge });
-    } else if (photo.local_photo?.auid && isLikelySamePhoto(photo, photo.local_photo)) {
-      return API.Q(NAPI.IMAGE_FULL(photo.local_photo.auid), { size: longEdge });
     }
   }
 
   // Base size conversion
-  if (msize !== undefined) {
+  else if (msize !== undefined) {
     if (photo.w && photo.h) {
       size = (Math.floor((msize * Math.max(photo.w, photo.h)) / Math.min(photo.w, photo.h)) - 1) as any;
     } else {
@@ -76,7 +75,7 @@ export function getPreviewUrl(opts: PreviewOptsSize | PreviewOptsMsize | Preview
   }
 
   // Convert to array
-  const [x, y] = typeof size === 'number' ? [size, size] : size!;
+  let [x, y] = typeof size === 'number' ? [size, size] : size!;
   const a = square ? '0' : '1';
   const c = photo.etag;
   const ix = photo.indexed_at;
@@ -84,11 +83,13 @@ export function getPreviewUrl(opts: PreviewOptsSize | PreviewOptsMsize | Preview
   // Special previews
   if (isLocalPhoto(photo)) {
     return API.Q(NAPI.IMAGE_PREVIEW(photo.fileid), { c, x, y });
-  } else if (isLikelySamePhoto(photo, photo.local_photo)) {
-    return API.Q(NAPI.IMAGE_PREVIEW(photo.local_photo.fileid), { c, x, y });
   } else if (photo.trashInfo) {
     return API.TRASH_PREVIEW(photo.fileid, x, y, a);
   }
+
+  // For full-sized previews, always ensure that the max preview
+  // is loaded, since only this one contains the U-HDR gainmap and ICC profiles.
+  if (sizeIsMax) x = y = -1;
 
   // Preview from server
   return API.Q(API.IMAGE_PREVIEW(photo.fileid), { c, x, y, a, ix });

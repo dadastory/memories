@@ -9,20 +9,49 @@ Confirm each step with the user before running it.
 
 ## Main release
 
-1. Bump `appinfo/info.xml` (`<version>`) + `package.json` (`"version"`), move `CHANGELOG.md` `[Unreleased]` to `## [vX.X.X] - YYYY-MM-DD`, all in one commit (`git commit -s`).
-2. Ship to master: `git fetch origin`, rebase `development` on `origin/master`, fast-forward `master`, push `master`. Linear history only, no merges.
-3. On master, verify in sync with `origin/master` and `development`. Dirty tree OK only if tag targets clean HEAD.
-4. Check tag absent first, then `git tag vX.X.X` and `git push origin vX.X.X`. Verify with `ls-remote` after.
-5. Push branches before tagging/releasing. Push only the new tag, never `--tags` (publishes stale local tags).
-6. Create GitHub release:
-   `gh release create <tag> --title <tag> --generate-notes --notes <NOTES> --notes-start-tag <prev-stable> --verify-tag`
-   Add `--prerelease` for alpha/beta/rc.
-   - `<NOTES>` = full release changelog text from `CHANGELOG.md` AND the changelog URL (both), prepended to auto notes.
-   - `--notes-start-tag` = last stable tag (auto picks newest tag by date, e.g. `go-vod/*` — must override).
-   - Wrong base: regenerate via `gh api .../generate-notes -f previous_tag_name=<prev>` + `gh release edit --notes-file`.
+1. Commit (`git commit -s`) in one commit:
+   - Bump `<version>` in `appinfo/info.xml` and `"version"` in `package.json`.
+   - Move `[Unreleased]` in `CHANGELOG.md` to `## [vX.X.X] - YYYY-MM-DD`.
+2. Ship to master: `git fetch origin`, rebase on `origin/master`, push `master`. Linear history, no merges. Push before tagging.
+3. Verify `master` matches `origin/master`. Dirty tree is OK only if the tag targets a clean HEAD.
+4. Tag: check the tag is absent, `git tag vX.X.X`, `git push origin vX.X.X`, verify with `ls-remote`. Never `--tags` (publishes stale local tags).
+5. Create the GitHub release:
+   ```sh
+   gh release create <tag> --title <tag> --generate-notes --notes <NOTES> --notes-start-tag <prev-stable> --verify-tag
+   ```
+   - `<NOTES>`: full changelog text for this release AND the changelog URL, prepended to auto notes.
+   - `<prev-stable>`: last stable tag. Must override; auto picks the newest tag by date, e.g. `go-vod/*`.
+   - Alpha/beta/rc: add `--prerelease`.
+   - Wrong base: regenerate with `gh api .../generate-notes -f previous_tag_name=<prev>`, then `gh release edit --notes-file`.
+
+## Hotfix release
+
+For hotfix releases, just update the latest entry in the CHANGELOG.md to point to the new version rather than creating a new entry. Then follow the main release steps. In the gh release changelog, just say "Hotfix release for vX.X.X" and link to the previous release and changelog.
 
 ## go-vod release (two phases)
 
-1. Phase 1: bump `VERSION` in `go-vod/main.go` only. Push master + dev, tag `go-vod/X.Y.Z` (CI builds binaries). Keep `GOVOD_VER` untouched.
-2. Phase 2 (after binaries exist): bump `GOVOD_VER` in `lib/Service/BinExt.php` in a separate commit, then `make bin-ext` to refresh the dev env.
-3. `VERSION`, `GOVOD_VER`, and tag must all agree (enforced by `get-bin-ext.sh` and `testGoVod`).
+`VERSION`, `GOVOD_VER` and the tag must agree (enforced by `get-bin-ext.sh` and `testGoVod`).
+
+1. Phase 1: bump `VERSION` in `go-vod/main.go` only, leaving `GOVOD_VER` untouched. Push master, tag `go-vod/X.Y.Z`. CI builds the binaries.
+2. Phase 2, once binaries exist, in a separate commit:
+   - Bump `GOVOD_VER` in `lib/Service/BinExt.php`.
+   - Update the `go-vod-*` hashes in `scripts/bin-ext.sha256` (`gh release view go-vod/X.Y.Z --json assets -q '.assets[] | "\(.name) \(.digest)"'`).
+   - `make bin-ext` to refresh the dev env and verify the hashes.
+
+## Android release
+
+Independent of app versions. `release.yaml` ignores `android/*` tags, so the APK is built and uploaded by hand.
+
+1. Commit (`git commit -s`) `chore(android): bump to 1.N`, changing only `android/app/build.gradle`: `versionCode = N`, `versionName = "1.N"`.
+2. Ask the user to build the AAB from the commit in Android Studio, upload it to Google Play (which signs it), and download the signed APK.
+3. Verify the APK:
+   - `aapt dump badging` shows `versionCode='N'`.
+   - `apksigner verify --print-certs`: the cert must match the previous release's APK (`gh release download android/1.<N-1>`), or updates fail.
+   - Tools are in `~/Library/Android/sdk/build-tools/<ver>/`; apksigner needs `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`.
+4. Ship to master as in the main release. Make sure the rebase pulled in nothing new, or the tag won't match the build.
+5. Tag: check the tag is absent, `git tag android/1.N`, `git push origin android/1.N`, verify with `ls-remote`.
+6. Create the GitHub release, with the APK named `memories-1.N.apk`:
+   ```sh
+   gh release create android/1.N memories-1.N.apk --title android/1.N --notes '**Full Changelog**: https://github.com/pulsejet/memories/compare/<prev>...android/1.N' --latest=false --verify-tag
+   ```
+   - Notes are only the compare link, no generated notes. `<prev>` is the last `android/*` release tag.

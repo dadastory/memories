@@ -283,7 +283,13 @@ onMounted(() => {
       for (const entry of entries) {
         if (entry.target === recyclerBefore.value) {
           // Cache the height for row scroll compensation.
+          const prevHeight = beforeHeight.value;
           beforeHeight.value = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+
+          // During restoration, createState compensates after the scroll is applied.
+          if (!routeState.restoring.value) {
+            compensateBeforeHeight(prevHeight);
+          }
           scrollerManager.value?.adjust();
         } else {
           // Recalculate photo layout debounced.
@@ -307,7 +313,7 @@ onBeforeUnmount(() => {
   resetState();
 });
 
-utils.useBus('files:file:created', softRefresh);
+utils.useBus('files:file:created', onFileCreated);
 utils.useBus('memories:timeline:fetch-day', fetchDay);
 utils.useBus('memories:timeline:deleted', deleteFromViewWithAnimation);
 utils.useBus('memories:timeline:soft-refresh', softRefresh);
@@ -375,6 +381,8 @@ const routeState = useRouteState({
   key: timelineRouteKey,
   state: { savedView, beforeHeight },
   scroll: { recycler },
+  // The saved scrollTop is only valid without a pending start offset.
+  beforePreserve: () => void flushStartOffset(),
 });
 
 /** Show skeleton placeholder rows on initial load */
@@ -427,8 +435,11 @@ async function routeChange(to: RouteLocationNormalized, from?: RouteLocationNorm
   if (from?.hash !== to.hash && !_m.viewer.isOpen && (fragment.viewer || fragment.day)) {
     // Open viewer
     const [dayidStr, key] = fragment.viewer?.args || fragment.day!.args;
-    const dayid = parseInt(dayidStr);
-    if (isNaN(dayid) || !key) return;
+    const dayid = utils.tryParseDayId(dayidStr, isMonthView.value);
+    if (dayid === undefined) {
+      console.warn('Failed to parse DayID from fragment:', dayidStr);
+      return;
+    }
 
     // Get day
     const day = heads.value.get(dayid)?.day;
@@ -440,17 +451,21 @@ async function routeChange(to: RouteLocationNormalized, from?: RouteLocationNorm
 
     // Find photo
     const photo = day?.detail?.find((p) => p.key === key);
-    if (!photo) return;
 
     // Scroll to photo if initializing, or if just a scroll change.
     if (!from || fragment.day) {
-      const index = list.value.findIndex((r) => r.type === 1 && r.day.dayid === dayid && r.photos.includes(photo));
-      if (index !== -1) {
+      let index = list.value.findIndex(
+        (r) => r.type === 1 && r.dayId === dayid && (!photo || r.photos.includes(photo)),
+      );
+      if (index === -1) {
+        index = utils.binarySearch(list.value, dayid, 'dayId');
+      }
+      if (index >= 0 && index < list.value.length) {
         recycler.value?.scrollToItem(index);
       }
     }
 
-    if (fragment.viewer) {
+    if (fragment.viewer && photo) {
       // Pass a getter-backed state so the viewer always reads the
       // current collections, even after a refresh replaces them.
       _m.viewer.openDynamic(photo, {
@@ -462,7 +477,7 @@ async function routeChange(to: RouteLocationNormalized, from?: RouteLocationNorm
         },
       });
     } else if (fragment.day) {
-      fragment.clear();
+      void fragment.clear();
     }
   }
 }
@@ -492,14 +507,8 @@ async function createState(signal: AbortSignal) {
   await raceWithAbort(signal, until(routeState.restoring).toBe(false));
   signal.throwIfAborted();
 
-  // If we stored the scroll position and the beforeHeight changed, we
-  // need to compensate the scroll position to keep the same viewport.
-  if (restoredBeforeHeight && restoredBeforeHeight !== beforeHeight.value) {
-    const element = recycler.value?.$el;
-    if (element && element.scrollTop > restoredBeforeHeight) {
-      recyclerState.startOffset -= beforeHeight.value - restoredBeforeHeight;
-    }
-  }
+  // The saved scroll position assumes the saved beforeHeight.
+  compensateBeforeHeight(restoredBeforeHeight);
 
   // Initialize scrollbar ticks for the restored rows.
   scrollerManager.value?.reflow();
@@ -511,6 +520,17 @@ async function createState(signal: AbortSignal) {
   // could remove days, shrink the timeline and clamp the restored scroll.
   const noCache = routeState.hasState.value || list.value.length > 0;
   await fetchDays({ noCache, signal });
+}
+
+/**
+ * Keep the same rows in the viewport after the before slot changes height.
+ * @param prevHeight Height of the before slot that the scroll position assumes
+ */
+function compensateBeforeHeight(prevHeight: number) {
+  const element = recycler.value?.$el;
+  if (element && element.scrollTop - recyclerState.startOffset > prevHeight) {
+    recyclerState.startOffset -= beforeHeight.value - prevHeight;
+  }
 }
 
 /** Reset all state */
@@ -587,6 +607,14 @@ async function _softRefreshInternal(
   }
 }
 
+/** Refresh for a new file, loading its day when known so the viewer can show it. */
+async function onFileCreated({ fileid, dayid }: { fileid: number; dayid?: number }) {
+  if (dayid === undefined) return softRefresh();
+  await ignoreAbort(softRefreshSync());
+  await ignoreAbort(fetchDay(dayid, { now: true }));
+  utils.bus.emit('memories:timeline:file-loaded', { fileid, dayid });
+}
+
 /** Do resize after some time */
 function handleResizeWithDelay() {
   resizeTimer.set(() => recomputeSizes(true), 100);
@@ -615,7 +643,7 @@ function recomputeSizes(load: boolean) {
 
   // Recycler height
   const recyclerEl = recycler.value!;
-  const targetHeight = height - tmHeight - 4;
+  const targetHeight = Math.max(0, height - tmHeight);
   const targetWidth = isMobile() ? width : width - 40;
   const heightChanged = recyclerEl.$el.clientHeight !== targetHeight;
   const widthChanged = rowWidth !== targetWidth;
@@ -1920,6 +1948,8 @@ async function fetchFakeDays({
 .recycler {
   will-change: scroll-position;
   contain: strict;
+  // Row shifts are compensated through the start offset.
+  overflow-anchor: none;
   height: 300px;
   width: 100%;
   transition: opacity 0.2s ease-in-out;

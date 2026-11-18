@@ -8,10 +8,9 @@ import android.widget.Toast
 import gallery.memories.NativeX
 
 /**
- * One-time WebView configuration. Default opaque background (no alpha
- * blending with the themed root). Popups stay in the same window so
- * MemoriesWebViewClient can route them (loopback inside, everything
- * else to the browser).
+ * One-time WebView configuration.
+ * Popups stay in the same window so MemoriesWebViewClient can route them
+ * (loopback inside, everything else to the browser).
  */
 object WebViewSetup {
     /**
@@ -23,8 +22,6 @@ object WebViewSetup {
     fun setup(webview: WebView, userAgent: String, jsInterface: NativeX, debug: Boolean) {
         val s = webview.settings
         s.javaScriptEnabled = true
-        // Popups never get their own window: window.open/target=_blank falls back
-        // into shouldOverrideUrlLoading, which externalizes non-loopback URLs.
         s.javaScriptCanOpenWindowsAutomatically = false
         s.setSupportMultipleWindows(false)
         s.domStorageEnabled = true
@@ -35,13 +32,20 @@ object WebViewSetup {
         s.useWideViewPort = true
         s.allowFileAccess = false
         s.allowContentAccess = false
-        // Disabled: don't send URL hashes to Google; WebView only loads first-party content.
-        s.safeBrowsingEnabled = false
+        s.safeBrowsingEnabled = false // no hashes to Google
+
+        if (Build.VERSION.SDK_INT >= 35) {
+            webview.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+        }
+
+        // Transparent webview to allow looking at elements below.
+        webview.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        webview.background = null
+
+        // Renderer priority important to avoid being killed in background.
         webview.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         webview.addJavascriptInterface(jsInterface, "nativex")
-        if (Build.VERSION.SDK_INT >= 35) {
-            webview.setRequestedFrameRate(View.REQUESTED_FRAME_RATE_CATEGORY_HIGH)
-        }
+
         if (debug) {
             Toast.makeText(webview.context, "Debugging enabled", Toast.LENGTH_SHORT).show()
             webview.clearCache(true)

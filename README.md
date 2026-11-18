@@ -1,10 +1,10 @@
-![Screenshot](appinfo/screenshot.jpg)
+![Screenshot](appinfo/screenshot.png)
 
 # Memories: Photo Management for Nextcloud
 
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/7Dr9f9vNjJ)
 [![Website](https://img.shields.io/website?down_color=red&down_message=offline&label=website&style=for-the-badge&up_color=brightgreen&up_message=online&url=https%3A%2F%2Fmemories.gallery)](https://memories.gallery)
-[![Demo](https://img.shields.io/website?down_color=red&down_message=offline&label=demo&style=for-the-badge&up_color=brightgreen&up_message=online&url=https%3A%2F%2Fdemo.memories.gallery)](https://demo.memories.gallery/apps/memories/)
+[![Demo](https://img.shields.io/website?down_color=red&down_message=offline&label=demo&style=for-the-badge&up_color=brightgreen&up_message=online&url=https%3A%2F%2Fdemo.memories.gallery%2Fapps%2Fmemories%2Fapi%2Fdescribe)](https://demo.memories.gallery/apps/memories/)
 [![Nextcloud Store](https://img.shields.io/badge/nextcloud_store-blue?style=for-the-badge&logo=nextcloud&logoColor=white)](https://apps.nextcloud.com/apps/memories)
 
 ![GitHub](https://img.shields.io/github/license/pulsejet/memories)
@@ -30,6 +30,7 @@ Memories is a _batteries-included_ photo management solution for Nextcloud with 
 - **📱 Mobile Support**: Work from any device, of any shape and size through the web app.
 - **✏️ Edit Metadata**: Edit dates and other metadata on photos quickly and in bulk.
 - **📦 Archive**: Store photos you don't want to see in your timeline in a separate folder.
+- **📸 Advanced Formats**: Support for Ultra-HDR and RAW image formats.
 - **📹 Video Transcoding**: Transcode videos and use HLS for maximal performance.
 - **🗺️ Map**: View your photos on a map, tagged with accurate reverse geocoding.
 - **📦 Migration**: Migrate easily from Nextcloud Photos and Google Takeout.
@@ -44,7 +45,7 @@ Memories is a _batteries-included_ photo management solution for Nextcloud with 
 
 ## 📱 Mobile Apps
 
-- An Android client for Memories is available in early access on [Google Play](https://play.google.com/store/apps/details?id=gallery.memories), [F-Droid](https://f-droid.org/packages/gallery.memories/) or [GitHub Releases](https://github.com/pulsejet/memories/releases?q=android).
+- An Android client for Memories is available on [Google Play](https://play.google.com/store/apps/details?id=gallery.memories), [F-Droid](https://f-droid.org/packages/gallery.memories/) or [GitHub Releases](https://github.com/pulsejet/memories/releases?q=android).
 - For automatic uploads, you can use the official Nextcloud mobile apps. 
    - Android: [Google Play](https://play.google.com/store/apps/details?id=com.nextcloud.client), [F-Droid](https://f-droid.org/en/packages/com.nextcloud.client/)
    - iOS: [App Store](https://apps.apple.com/us/app/nextcloud/id1125420102).
@@ -59,13 +60,13 @@ See [`.devcontainer/README.md`](.devcontainer/README.md) for more information.
 To set up a development instance manually, follow these steps:
 
 1. ☁ Clone this monorepo into the `custom_apps` folder of your Nextcloud.
-1. 📥 Install [Composer](https://getcomposer.org/) and [Node.js 18](https://nodejs.org)
+1. 📥 Install [Composer](https://getcomposer.org/) and [Node.js](https://nodejs.org)
 1. 👩‍💻 In a terminal, run the command `make dev-setup` to install the dependencies.
 1. 🏗 To build/watch the UI, run `make watch-js`.
 1. ✅ Enable the app through the app management of your Nextcloud.
 1. ⚒️ (Strongly recommended) use VS Code for development and install these extensions (`Ctrl+Shift+P` > `Show Recommended Extensions`).
    - [PHP Intelephense](https://marketplace.visualstudio.com/items?itemName=bmewburn.vscode-intelephense-client): For PHP intellisense and static analysis
-   - [PHP-CS-Fixer](https://marketplace.visualstudio.com/items?itemName=muuvmuuv.vscode-just-php-cs-fixer): For PHP formatting (alternatively, `make php-cs-fixer`)
+   - [PHP-CS-Fixer](https://marketplace.visualstudio.com/items?itemName=muuvmuuv.vscode-just-php-cs-fixer): For PHP formatting (alternatively, `make php-format`)
    - [Psalm](https://marketplace.visualstudio.com/items?itemName=getpsalm.psalm-vscode-plugin): For PHP static analysis (alternatively, `make psalm`)
    - [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode): For autoformatting Vue and Typescript
    - [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar): For Vue intellisense and static analysis
@@ -75,7 +76,7 @@ This monorepo is organized into the following packages:
 - [lib](lib): Backend and database migrations (PHP).
 - [src](src): Frontend for all platforms (Vue)
 - [go-vod](go-vod): On-demand video transcoder (Go)
-- [android](android): Android implemention of NativeX (Kotlin)
+- [android](android): Android implementation of NativeX (Kotlin)
 - [l10n](l10n): Translations (Transifex)
 
 Releases are organized with these tags:
@@ -101,7 +102,7 @@ For the full changelog, see [CHANGELOG.md](CHANGELOG.md).
 
 To the great folks building Nextcloud, PHP, Vue and all the other dependencies that make this project possible.
 
-Thanks to [GitHub](https://github.com), [CircleCI](https://circleci.com/) and [BrowserStack](https://www.browserstack.com) for sponsorship for Open Source projects for CI / testing on different devices.
+Thanks to [GitHub](https://github.com) and [BrowserStack](https://www.browserstack.com) for sponsorship for Open Source projects for CI / testing on different devices.
 
 ## 📄 License
 

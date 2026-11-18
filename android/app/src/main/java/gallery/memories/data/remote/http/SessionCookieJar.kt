@@ -1,6 +1,8 @@
 package gallery.memories.data.remote.http
 
 import android.content.Context
+import androidx.core.content.edit
+import gallery.memories.data.local.secure.SecureCredentialStore
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -26,11 +28,13 @@ import org.json.JSONObject
  * Basic auth is still sent on every call as an automatic fallback: if the
  * session lapsed, the server just logs in again (one slow call) and the
  * jar refreshes itself from the fresh `Set-Cookie`s.
+ *
+ * Encrypted at rest like the token: `oc_sessionPassphrase` is just as sensitive.
  */
-class SessionCookieJar(context: Context) : CookieJar {
+class SessionCookieJar(context: Context, private val secure: SecureCredentialStore) : CookieJar {
     companion object {
         private const val PREFS = "session_cookies"
-        private const val KEY = "cookies"
+        private const val KEY = "encrypted_cookies"
         private const val MAX_COOKIES = 64
     }
 
@@ -59,11 +63,11 @@ class SessionCookieJar(context: Context) : CookieJar {
     @Synchronized
     fun clear() {
         cookies.clear()
-        prefs.edit().remove(KEY).apply()
+        prefs.edit { remove(KEY) }
     }
 
     private fun load(): List<Cookie> = try {
-        val raw = prefs.getString(KEY, null) ?: return emptyList()
+        val raw = prefs.getString(KEY, null)?.let(secure::decrypt) ?: return emptyList()
         val arr = JSONArray(raw)
         val now = System.currentTimeMillis()
         List(arr.length()) { parse(arr.getJSONObject(it)) }
@@ -83,7 +87,7 @@ class SessionCookieJar(context: Context) : CookieJar {
                 .put("secure", c.secure).put("httpOnly", c.httpOnly)
                 .put("hostOnly", c.hostOnly))
         }
-        prefs.edit().putString(KEY, arr.toString()).apply()
+        prefs.edit { putString(KEY, secure.encrypt(arr.toString())) }
     } catch (_: Exception) {}
 
     private fun parse(o: JSONObject): Cookie? = try {

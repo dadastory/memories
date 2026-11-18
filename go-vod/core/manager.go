@@ -51,9 +51,11 @@ type Manager struct {
 	// usesTemp marks inputs served from a temp file download.
 	usesTemp bool
 	// serviceToken is the short-lived provisioned token sent back upstream.
-	// Refreshed on every request since each carries a new token.
+	// Kept stable for an hour so PHP can reuse open files, then replaced
+	// by the next request's token.
 	tokenMu      sync.RWMutex
 	serviceToken string
+	tokenAt      time.Time
 	// fileid keys the on-disk cache; etag validates it.
 	fileid int64
 	etag   string
@@ -75,7 +77,10 @@ type Manager struct {
 	// playableCodecs lists browser-playable codecs; immutable after creation.
 	playableCodecs []string
 
-	// copyEligible is set from the base probe (playable codec, no rotation)
+	// closeBridgeFile releases the file in bridge workers on Destroy.
+	closeBridgeFile func()
+
+	// copyEligible is set from the base probe (playable fMP4 codec)
 	// and is immutable after creation. It only says keyframes are worth trying.
 	copyEligible bool
 
@@ -134,18 +139,20 @@ func newManager(ctx context.Context, a NewManagerArgs) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{
-		c:              a.C,
-		tc:             a.TConfig,
-		url:            a.URL,
-		input:          a.URL,
-		usesTemp:       a.UsesTemp,
-		serviceToken:   a.ServiceToken,
-		id:             a.StreamID,
-		fileid:         a.FileID,
-		etag:           a.Etag,
-		generation:     a.Generation,
-		idle:           a.Idle,
-		playableCodecs: a.PlayableCodecs,
+		c:               a.C,
+		tc:              a.TConfig,
+		url:             a.URL,
+		input:           a.URL,
+		usesTemp:        a.UsesTemp,
+		serviceToken:    a.ServiceToken,
+		tokenAt:         time.Now(),
+		id:              a.StreamID,
+		fileid:          a.FileID,
+		etag:            a.Etag,
+		generation:      a.Generation,
+		idle:            a.Idle,
+		playableCodecs:  a.PlayableCodecs,
+		closeBridgeFile: a.CloseBridgeFile,
 	}
 	m.streams = make(map[string]*Stream)
 
@@ -253,8 +260,7 @@ func newManager(ctx context.Context, a NewManagerArgs) (*Manager, error) {
 
 			// remove invalid streams
 			if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
-				(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) || // no more than 80% of original bitrate
-				(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
+				(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) { // no more than 80% of original bitrate
 
 				// remove stream
 				delete(m.streams, k)
@@ -321,7 +327,7 @@ func newManager(ctx context.Context, a NewManagerArgs) (*Manager, error) {
 				}
 
 				// Nothing done for 5 minutes
-				if m.inactive.Load() >= int32(m.c.ManagerIdleTime/5) {
+				if m.inactive.Load() >= int32(idleTicks(m.c.ManagerIdleTime)) {
 					t.Stop()
 					m.Destroy()
 					m.idle <- IdleEvent{ID: m.id, Generation: m.generation}
@@ -348,6 +354,9 @@ func (m *Manager) Destroy() {
 		if err := os.RemoveAll(m.tempDir); err != nil {
 			log.Printf("%s: removing cache directory: %v", m.id, err)
 		}
+		if m.closeBridgeFile != nil {
+			m.closeBridgeFile()
+		}
 	})
 }
 
@@ -365,6 +374,17 @@ func (m *Manager) Renditions() []Rendition {
 	return out
 }
 
+// idleTicks converts an idle time in seconds to 5s ticks, at least one, so
+// a short idle time can't tear down on the first tick.
+func idleTicks(seconds int) int {
+	return max(1, seconds/5)
+}
+
+// ChunkSize is the segment length the streams were created with.
+func (m *Manager) ChunkSize() int {
+	return m.tc.ChunkSize
+}
+
 func (m *Manager) Duration() time.Duration {
 	return m.probe.Duration
 }
@@ -375,11 +395,13 @@ func (m *Manager) getServiceToken() string {
 	return m.serviceToken
 }
 
+// Native PHP tokens are reusable for an hour; embedders control their own grant lifetime.
 func (m *Manager) refreshServiceToken(serviceToken string) {
-	if serviceToken != "" {
-		m.tokenMu.Lock()
-		defer m.tokenMu.Unlock()
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	if serviceToken != "" && time.Since(m.tokenAt) >= m.c.ServiceTokenReuseTime {
 		m.serviceToken = serviceToken
+		m.tokenAt = time.Now()
 	}
 }
 
@@ -416,7 +438,7 @@ func (m *Manager) TryCacheCopySegments() ([]ffmpeg.Segment, bool) {
 	if !ok {
 		return nil, false
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
+	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, false
 	}
@@ -508,6 +530,23 @@ func (m *Manager) ServeChunkContext(ctx context.Context, w http.ResponseWriter, 
 	return true
 }
 
+func (m *Manager) ServeInit(w http.ResponseWriter, quality string) bool {
+	return m.ServeInitContext(context.Background(), w, quality)
+}
+
+func (m *Manager) ServeInitContext(ctx context.Context, w http.ResponseWriter, quality string) bool {
+	stream, ok := m.streams[quality]
+	if !ok {
+		return false
+	}
+	if quality == QUALITY_DIRECT {
+		// Copy and re-encode inits differ; settle the grid first.
+		m.EnsureCopySegments()
+	}
+	stream.ServeInitContext(ctx, w)
+	return true
+}
+
 func (m *Manager) ServeFullVideo(w http.ResponseWriter, r *http.Request, quality string) {
 	if stream, ok := m.streams[quality]; ok {
 		stream.ServeFullVideo(w, r)
@@ -565,9 +604,10 @@ func (m *Manager) ffprobe(ctx context.Context) error {
 		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
 	}
 
-	// Copy eligibility is cheap (codec + rotation); keyframes come later
+	// Copy eligibility is cheap (codec only); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
-	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs)
+	// fMP4 keeps the display matrix, so rotated sources copy too.
+	m.copyEligible = IsCodecPlayable(m.probe.CodecName, m.playableCodecs) && IsCodecFMP4(m.probe.CodecName)
 
 	return nil
 }
@@ -578,7 +618,7 @@ func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
 	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
 	if keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag); ok {
 		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
-		segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
+		segs := ffmpeg.CopySegments(keys, m.probe.Duration)
 		if len(segs) == 0 {
 			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
 		}
@@ -593,7 +633,7 @@ func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
 	if err := StoreCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag, keys); err != nil {
 		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
+	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
 	}
@@ -610,7 +650,11 @@ func (m *Manager) downloadTemp() error {
 		req.Header.Set(ServiceTokenHeader, token)
 	}
 
-	res, err := UpstreamClient.Do(req)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: m.c.Transport(),
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}

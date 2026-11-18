@@ -11,7 +11,13 @@
     }"
     @fullscreenchange="fullscreenChange"
   >
-    <ImageEditor v-if="editorOpen && currentPhoto" :photo="currentPhoto" @close="editorOpen = false" />
+    <PhotoEditor
+      v-if="editorOpen && currentPhoto"
+      :photo="currentPhoto"
+      :get-slide-rect="getSlideRect"
+      @ready="onEditorReady"
+      @close="closeEditor"
+    />
 
     <!-- Loading indicator -->
     <XLoadingIcon class="loading-icon centered" v-if="loading" />
@@ -19,7 +25,7 @@
     <div
       ref="inner"
       class="inner"
-      v-show="!editorOpen"
+      v-show="!(editorOpen && editorReady)"
       @pointermove.passive="setUiVisible"
       @pointerdown.passive="setUiVisible"
       @touchstart.passive="tapPatch.onTouchStart"
@@ -121,7 +127,8 @@ import { t } from '@services/l10n';
 import { constants } from '@services/constants';
 import initstate from '@services/init-state';
 import { makeTapPatch } from '@services/compat/mobile-click';
-import { confirmDestructive } from '@services/utils/dialog';
+import { confirmDestructive, showError } from '@services/utils/dialog';
+import { hasWebGL } from '@services/utils/dom';
 import { cacheData, getCachedData } from '@services/cache';
 import { isAbortError, useAbort } from '@services/utils/abort-vue';
 import { RenewingTimeout } from '@services/utils/renewing-timeout';
@@ -129,22 +136,25 @@ import * as dav from '@services/dav';
 import * as utils from '@services/utils/common';
 import * as nativex from '@native';
 
-import ImageEditor from './ImageEditor.vue';
+import PhotoEditor from './PhotoEditor.vue';
 import ViewerDateAddress from './ViewerDateAddress.vue';
 import ViewerBottomSheet from './ViewerBottomSheet.vue';
 import ViewerSheetGestures from './ViewerSheetGestures.vue';
 import MobileBottomBar from '@components/MobileBottomBar.vue';
 import XLoadingIcon from '@components/XLoadingIcon.vue';
+import * as ximg from '@components/frame/XImgCache';
+
 import PhotoSwipe, { type PhotoSwipeOptions } from 'photoswipe';
 import 'photoswipe/style.css';
+
 import PsImage from './PsImage';
 import PsVideo from './PsVideo';
 import PsLivePhoto from './PsLivePhoto';
 import PsPhotoSphere from './PsPhotoSphere';
+import PsNativeHole from './PsNativeHole';
 
-import type { IImageInfo, IPhoto, TimelineState } from '@typings';
-import type { PsContent } from './types';
-import type { MediaPlayerElement } from 'vidstack/elements';
+import type { IImageInfo, IPhoto, TimelineState, VideoControllerElement } from '@typings';
+import type { PsContent, PsPhotoSwipe } from './types';
 
 import LivePhotoIcon from '@components/icons/LivePhoto.vue';
 import BackIcon from 'vue-material-design-icons/ArrowLeft.vue';
@@ -203,6 +213,7 @@ const loading = ref(0);
 const isOpen = ref(false);
 let originalTitle: string | null = null;
 const editorOpen = ref(false);
+const editorReady = ref(false);
 
 const show = ref(false);
 const fullyOpened = ref(false);
@@ -216,11 +227,12 @@ const sheetOpen = ref(false);
 let activityTimer = 0;
 
 /** Base dialog */
-const photoswipe = ref<PhotoSwipe | null>(null);
-const psVideo = ref<PsVideo | null>(null);
-const psImage = ref<PsImage | null>(null);
-const psLivePhoto = ref<PsLivePhoto | null>(null);
-const psPhotoSphere = ref<PsPhotoSphere | null>(null);
+const photoswipe = ref<PsPhotoSwipe | null>(null);
+let psNativeHole: PsNativeHole | null = null;
+let psImage: PsImage | null = null;
+let psLivePhoto: PsLivePhoto | null = null;
+let psVideo: PsVideo | null = null;
+let psPhotoSphere: PsPhotoSphere | null = null;
 
 /** Live photo state */
 const liveState = reactive({
@@ -278,6 +290,7 @@ utils.useBus('memories:sidebar:opened', handleAppSidebarOpen);
 utils.useBus('memories:sidebar:closed', handleAppSidebarClose);
 utils.useBus('files:file:created', handleFileUpdated);
 utils.useBus('files:file:updated', handleFileUpdated);
+utils.useBus('memories:timeline:file-loaded', (file) => showNewFile(file));
 utils.useBus('memories:fragment:pop:viewer', close);
 
 /** Number of top bar buttons to show inline */
@@ -452,7 +465,7 @@ const actions = computed((): IViewerAction[] => {
       name: t('memories', 'Edit'),
       icon: markRaw(TuneIcon),
       callback: openEditor,
-      if: canEdit.value && !isVideo.value,
+      if: canEdit.value && !isVideo.value && config.vips_enabled,
     },
     {
       id: 'download',
@@ -628,9 +641,20 @@ function setUiVisible(event: PointerEvent | false) {
     const isPointer = event instanceof PointerEvent;
     const isMouse = isPointer && event.pointerType !== 'touch';
     if (isOpen.value && (!isPointer || isMouse)) {
+      const targetElem = event.target as Element | null;
       photoswipe.value?.template?.classList.add('pswp--ui-visible');
 
-      if (isMouse) {
+      // Do not hide the UI if the user is over a control element.
+      const controls = [
+        'div.top-bar',
+        'div.top-bar-left',
+        'div.bottom-bar',
+        'div.m-vc-controls',
+        '.pswp__button',
+        '.action-item__popper',
+      ];
+
+      if (isMouse && !targetElem?.closest?.(controls.join(','))) {
         activityTimer = window.setTimeout(() => {
           if (isOpen.value) {
             photoswipe.value?.template?.classList.remove('pswp--ui-visible');
@@ -649,7 +673,7 @@ async function createBase(args: PhotoSwipeOptions) {
   sheetOpen.value = false;
   await nextTick();
 
-  const pswp = new PhotoSwipe({
+  const pswp_ = new PhotoSwipe({
     counter: false,
     close: false,
     zoom: false,
@@ -692,14 +716,22 @@ async function createBase(args: PhotoSwipeOptions) {
   // PhotoSwipe relies on object identity internally, and Vue's
   // reactivity proxying breaks it. All photoswipe-related objects
   // MUST use markRaw() if stored in data.
-  photoswipe.value = markRaw(pswp);
+  const pswp = markRaw(pswp_) as PsPhotoSwipe;
+  photoswipe.value = pswp;
 
   // Debugging only
-  _m.viewer.photoswipe = photoswipe.value;
+  _m.viewer.photoswipe = pswp;
 
   // Check if someone else is trapping focus
   const hasNestedTrap = (e: Event): Element | null => {
-    const selectors = ['#app-sidebar-vue', '#app-sidebar-native', '.v-popper__popper', '.modal-mask', '.oc-dialog'];
+    const selectors = [
+      '#app-sidebar-vue',
+      '#app-sidebar-native',
+      '.v-popper__popper',
+      '.modal-mask',
+      '.oc-dialog',
+      '.me-photo-editor',
+    ];
     if (e.target instanceof Element) {
       return e.target.closest(selectors.join(','));
     }
@@ -707,24 +739,37 @@ async function createBase(args: PhotoSwipeOptions) {
   };
 
   // Monkey patch for focus trapping in sidebar
-  const psKeyboard = photoswipe.value.keyboard as any;
-  const _onFocusIn = psKeyboard['_onFocusIn'];
+  const _onFocusIn = pswp.keyboard['_onFocusIn'];
   console.assert(_onFocusIn, 'Missing _onFocusIn for monkey patch');
-  psKeyboard['_onFocusIn'] = (e: FocusEvent) => {
+  pswp.keyboard['_onFocusIn'] = (e: FocusEvent) => {
     if (hasNestedTrap(e)) return;
-    _onFocusIn.call(photoswipe.value!.keyboard, e);
+    _onFocusIn.call(pswp.keyboard, e);
   };
 
   // Refresh sidebar on change
-  photoswipe.value.on('change', () => {
+  pswp.on('change', () => {
     if (sidebarOpen.value) {
       openSidebar();
     }
   });
 
   // Handle keydown
-  photoswipe.value.on('keydown', (e) => {
+  pswp.on('keydown', (e) => {
     if (e.defaultPrevented) return;
+
+    // The photo editor owns all keyboard input while open.
+    if (editorOpen.value) {
+      e.preventDefault();
+      return;
+    }
+
+    // Leaving the slide would empty the fullscreen video container.
+    const wouldDestroy = ['ArrowLeft', 'ArrowRight', 'Delete'].includes(e.originalEvent.key);
+    const isFullscreenVideo = () => document.fullscreenElement?.classList.contains('video-container');
+    if (wouldDestroy && isFullscreenVideo()) {
+      e.preventDefault();
+      return;
+    }
 
     // Check if someone else is trapping focus.
     // For the sidebar, however, we want to continue executing our actions.
@@ -739,7 +784,7 @@ async function createBase(args: PhotoSwipeOptions) {
   });
 
   // Make sure buttons are styled properly
-  photoswipe.value.addFilter('uiElement', (element, data) => {
+  pswp.addFilter('uiElement', (element, data) => {
     // add button-vue class if button
     if (element.classList.contains('pswp__button')) {
       element.classList.add('button-vue');
@@ -748,14 +793,14 @@ async function createBase(args: PhotoSwipeOptions) {
   });
 
   // Total number of photos in this view
-  photoswipe.value.addFilter('numItems', () => globalCount.value);
+  pswp.addFilter('numItems', () => globalCount.value);
 
   // Put viewer over everything else
   const navElem = document.getElementById('app-navigation-vue');
-  photoswipe.value.on('beforeOpen', () => {
+  pswp.on('beforeOpen', () => {
     navElem?.style.setProperty('z-index', '0');
   });
-  photoswipe.value.on('openingAnimationStart', () => {
+  pswp.on('openingAnimationStart', () => {
     isOpen.value = true;
     fullyOpened.value = false;
     if (sidebarOpen.value) {
@@ -763,10 +808,10 @@ async function createBase(args: PhotoSwipeOptions) {
     }
     nativex.setTheme('#000000', true); // viewer is always dark
   });
-  photoswipe.value.on('openingAnimationEnd', () => {
+  pswp.on('openingAnimationEnd', () => {
     fullyOpened.value = true;
   });
-  photoswipe.value.on('close', () => {
+  pswp.on('close', () => {
     isOpen.value = false;
     fullyOpened.value = false;
     sheetOpen.value = false;
@@ -775,9 +820,9 @@ async function createBase(args: PhotoSwipeOptions) {
     hideSidebar();
     setFragment(null);
     updateTitle(undefined);
-    nativex.setTheme(); // reset
+    requestAnimationFrame(() => setTimeout(nativex.setTheme, 20)); // reset
   });
-  photoswipe.value.on('destroy', () => {
+  pswp.on('destroy', () => {
     navElem?.style.setProperty('z-index', '');
 
     // reset everything
@@ -785,43 +830,47 @@ async function createBase(args: PhotoSwipeOptions) {
     isOpen.value = false;
     fullyOpened.value = false;
     editorOpen.value = false;
+    editorReady.value = false;
     sheetOpen.value = false;
     photoswipe.value = null;
     list.value = [];
     globalCount.value = 0;
     globalAnchor.value = -1;
+    showNewFile = () => {};
     clearTimeout(slideshowTimer.value);
     slideshowTimer.value = 0;
   });
 
   // Update vue route for deep linking
-  photoswipe.value.on('slideActivate', (e) => {
-    currIndex.value = photoswipe.value!.currIndex;
+  pswp.on('slideActivate', (e) => {
+    currIndex.value = pswp.currIndex;
     const photo = e.slide?.data?.photo;
     setFragment(photo);
     updateTitle(photo);
 
     // Remove active class from others and add to this one
-    photoswipe.value!.element?.querySelectorAll('.pswp__item').forEach((el) => el.classList.remove('active'));
+    pswp.element?.querySelectorAll('.pswp__item').forEach((el) => el.classList.remove('active'));
     e.slide.holderElement?.classList.add('active');
   });
 
-  // Video support
-  const psVideoInstance = new PsVideo(<any>photoswipe.value);
-  psVideo.value = markRaw(psVideoInstance);
+  // Native hole below the WebView, mirrors the active slide box
+  psNativeHole = new PsNativeHole(pswp);
 
   // Image support
-  psImage.value = markRaw(new PsImage(<any>photoswipe.value));
+  psImage = new PsImage(pswp);
 
   // Live Photo support
-  psLivePhoto.value = markRaw(new PsLivePhoto(<any>photoswipe.value, <any>psImage.value, liveState));
+  psLivePhoto = new PsLivePhoto(pswp, psImage, liveState);
+
+  // Video support
+  psVideo = new PsVideo(pswp);
 
   // Panorama sphere support
-  psPhotoSphere.value = markRaw(new PsPhotoSphere(<any>photoswipe.value));
+  psPhotoSphere = new PsPhotoSphere(pswp);
 
   // Patch the close button to stop the slideshow
-  const _close = photoswipe.value.close.bind(photoswipe.value);
-  photoswipe.value.close = () => {
+  const _close = pswp.close.bind(pswp);
+  pswp.close = () => {
     if (slideshowTimer.value) {
       stopSlideshow();
     } else {
@@ -830,18 +879,18 @@ async function createBase(args: PhotoSwipeOptions) {
   };
 
   // Patch the next/prev buttons to reset slideshow timer
-  const _next = photoswipe.value.next.bind(photoswipe.value);
-  const _prev = photoswipe.value.prev.bind(photoswipe.value);
-  photoswipe.value.next = () => {
+  const _next = pswp.next.bind(pswp);
+  const _prev = pswp.prev.bind(pswp);
+  pswp.next = () => {
     resetSlideshowTimer();
     _next();
   };
-  photoswipe.value.prev = () => {
+  pswp.prev = () => {
     resetSlideshowTimer();
     _prev();
   };
 
-  return photoswipe.value;
+  return pswp;
 }
 
 /** Set the route hash to the given photo */
@@ -856,6 +905,9 @@ function setFragment(photo: IPhoto | null) {
     return fragment.pop(fragment.types.viewer);
   }
 }
+
+/** Moves to a new file if it landed in a listed day; only set for dynamic lists. */
+let showNewFile: (file: { fileid: number; dayid: number }) => void = () => {};
 
 /** Open using start photo and rows list */
 async function openDynamic(anchorPhoto: IPhoto, timeline: TimelineState) {
@@ -1024,6 +1076,48 @@ async function openDynamic(anchorPhoto: IPhoto, timeline: TimelineState) {
       }
     }
   });
+
+  showNewFile = async ({ dayid, fileid }) => {
+    // Nothing to do unless the file is in this view
+    const detail = timeline.heads.get(dayid)?.day.detail ?? [];
+    const dayIdx = detail.findIndex((p) => p.fileid === fileid);
+    if (dayIdx < 0) return;
+
+    // Cache the preview first so the slide is never blank.
+    try {
+      await ximg.fetchImage(
+        utils.getPreviewUrl({
+          photo: detail[dayIdx],
+          size: 'screen',
+        }),
+      );
+    } catch {
+      // pass
+    }
+
+    const pswp = photoswipe.value;
+    const start = list.value.findIndex((p) => p.dayid === dayid);
+    if (!pswp || start < 0) return;
+
+    // Replace the stale photos of this day with the fetched ones
+    const prevCount = list.value.filter((p) => p.dayid === dayid).length;
+    list.value.splice(start, prevCount, ...detail);
+
+    // The refresh may have changed other days too, so recompute fully
+    globals = computeGlobals();
+    globalCount.value = globals.count;
+    globalAnchor.value = globals.anchor;
+
+    // Slides around both positions hold stale photos for their indices.
+    const [from, to] = [pswp.currIndex, globals.anchor + start + dayIdx];
+    for (let i = Math.min(from, to) - 3; i <= Math.max(from, to) + 3; i++) {
+      if (i !== from) {
+        pswp.refreshSlideContent(i);
+      }
+    }
+    pswp.goTo(to);
+    pswp.refreshSlideContent(from);
+  };
 
   pswp!.init();
 }
@@ -1199,8 +1293,14 @@ async function loadMetadata(photo: IPhoto) {
 }
 
 async function openEditor() {
-  // Only for JPEG for now
-  if (!canEdit.value) return;
+  // The editor runs entirely through vips; hide it when unavailable.
+  if (!canEdit.value || !config.vips_enabled) return;
+
+  // Make sure WebGL is available.
+  if (!hasWebGL()) {
+    showError(t('memories', 'WebGL is disabled or unsupported in this browser.'));
+    return;
+  }
 
   // Warn before editing Live Photos
   if (isLivePhoto.value) {
@@ -1214,7 +1314,35 @@ async function openEditor() {
   }
 
   // Open editor
+  editorReady.value = false;
   editorOpen.value = true;
+}
+
+function getSlideRect() {
+  return photoswipe.value?.currSlide?.content?.element?.getBoundingClientRect() ?? null;
+}
+
+function onEditorReady() {
+  // Force-hide the native image view to prevent glitches.
+  if (!editorReady.value && photoswipe.value?.currSlide) {
+    photoswipe.value.currSlide.data.nxImageDisabled ??= 0;
+    photoswipe.value.currSlide.data.nxImageDisabled++;
+    photoswipe.value.dispatch('initialZoomPan');
+  }
+
+  editorReady.value = true;
+}
+
+/** Close the editor and reset its ready gate */
+function closeEditor() {
+  if (editorReady.value && photoswipe.value?.currSlide) {
+    photoswipe.value.currSlide.data.nxImageDisabled ??= 1;
+    photoswipe.value.currSlide.data.nxImageDisabled--;
+    photoswipe.value.dispatch('initialZoomPan');
+  }
+
+  editorOpen.value = false;
+  editorReady.value = false;
 }
 
 /** Share the current photo externally */
@@ -1225,6 +1353,7 @@ function shareCurrent() {
 /** Key press events */
 function keydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
+  if (editorOpen.value) return;
 
   if (e.key === 'Delete') {
     if (routeIs.Trash) {
@@ -1262,7 +1391,10 @@ async function deleteCurrent(action: DeleteAction = DeleteAction.Delete) {
   try {
     updateLoading(1);
     if (action === DeleteAction.Delete) {
-      for await (const p of dav.deletePhotos([photo], { route })) {
+      for await (const p of dav.deletePhotos([photo], {
+        route: route,
+        confirm: !config.skip_viewer_delete_confirm,
+      })) {
         if (!p[0]) return;
       }
     } else if (action === DeleteAction.TrashDelete) {
@@ -1309,12 +1441,12 @@ async function deleteCurrent(action: DeleteAction = DeleteAction.Delete) {
 
 /** Play the current live photo */
 function playLivePhoto() {
-  psLivePhoto.value?.play(photoswipe.value!.currSlide!.content as PsContent);
+  psLivePhoto?.play(photoswipe.value!.currSlide!.content as PsContent);
 }
 
 /** Toggle the panorama sphere viewer */
 function toggleSphere() {
-  void psPhotoSphere.value?.toggle();
+  void psPhotoSphere?.toggle();
 }
 
 /** Favorite the current photo */
@@ -1489,7 +1621,9 @@ function slideshowTimerFired() {
   // If this is a video, wait for it to finish
   if (isVideo.value) {
     // Get active player element
-    const player = photoswipe.value?.element?.querySelector<MediaPlayerElement>('.pswp__item.active media-player');
+    const player = photoswipe.value?.element?.querySelector<VideoControllerElement>(
+      '.pswp__item.active :is(video, viewer-video-native-hole)',
+    );
 
     // If no player is found by now, something likely went wrong. Just skip ahead.
     // Otherwise check if video is not ended yet.
@@ -1565,9 +1699,10 @@ function updateAlbums() {
 
 <style lang="scss" scoped>
 .viewer-outer {
-  z-index: 2020;
+  z-index: var(--m-z-index-viewer); // above nc-header
   width: v-bind(outerWidth) !important;
   height: 100vh;
+  height: 100dvh;
   position: fixed;
   top: 0;
   left: 0;
@@ -1707,31 +1842,58 @@ function updateAlbums() {
 
 .inner {
   width: inherit;
-  :deep(.pswp) {
-    width: inherit;
-  }
-
-  :deep(.pswp__top-bar) {
-    background: linear-gradient(0deg, transparent, rgba(0, 0, 0, 0.3));
-  }
-
-  :deep(.video-container.error) {
-    color: red;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
 }
 
-:deep(.pswp) {
+.inner :deep(.pswp) {
   contain: strict;
+  width: inherit;
+
+  .pswp__top-bar {
+    background: linear-gradient(0deg, transparent, rgba(0, 0, 0, 0.3));
+
+    .pswp__preloader {
+      display: none;
+    }
+  }
 
   .pswp__zoom-wrap {
     width: 100%;
   }
 
-  img.pswp__img {
+  div.pswp__img > img.ximg {
+    height: 100%;
+    width: 100%;
     object-fit: contain;
+    position: absolute;
+    top: 0;
+    left: 0;
+
+    &--thumbnail {
+      z-index: 10;
+      display: block;
+    }
+    &--preview {
+      z-index: 20;
+      display: block;
+    }
+    &--full {
+      z-index: 30;
+      display: none;
+    }
+  }
+
+  .memories-viewer.fully-opened & {
+    // Show the full image only when fully opened + active
+    div.pswp__item.active div.pswp__img > img.ximg--full {
+      display: block;
+    }
+  }
+
+  .memories-viewer:not(.fully-opened) & {
+    // Hide the preview image while closing when thumbnail exists.
+    div.pswp__img > img.ximg--thumbnail ~ img.ximg--preview {
+      display: none;
+    }
   }
 
   .pswp__button {

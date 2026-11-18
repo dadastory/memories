@@ -51,14 +51,15 @@ type IdleEvent struct {
 // ManagerParams identifies a manager for a file and client. Token is
 // per-request auth material, refreshed on hits, never identity.
 type ManagerParams struct {
-	URL            string
-	StreamID       string
-	FileID         int64
-	Etag           string
-	ServiceToken   string
-	PlayableCodecs []string
-	TConfig        config.TCfg
-	UsesTemp       bool
+	URL             string
+	StreamID        string
+	FileID          int64
+	Etag            string
+	ServiceToken    string
+	PlayableCodecs  []string
+	TConfig         config.TCfg
+	UsesTemp        bool
+	CloseBridgeFile func()
 	// CacheReservationBytes pins an embedding service's conservative byte budget
 	// before native probing knows the exact stream layout.
 	CacheReservationBytes int64
@@ -271,19 +272,22 @@ func (r *Registry) create(ctx context.Context, p ManagerParams) (*Manager, error
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if r.closed || ctx.Err() != nil {
+		r.mu.Unlock()
 		manager.Destroy()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, errors.New("registry closed")
 	}
-	if old := r.members[p.StreamID]; old != nil {
+	old := r.members[p.StreamID]
+	r.members[p.StreamID] = manager
+	r.mu.Unlock()
+
+	// Outside the lock: Destroy waits on each stream's mutex.
+	if old != nil {
 		old.Destroy()
 	}
-	r.members[p.StreamID] = manager
 	return manager, nil
 }
 

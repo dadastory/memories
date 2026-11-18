@@ -1,18 +1,19 @@
 package gallery.memories.data.local.media
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.icu.text.SimpleDateFormat
 import android.icu.util.TimeZone
+import android.icu.util.ULocale
 import android.media.MediaMetadataRetriever
-import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import androidx.exifinterface.media.ExifInterface
 import gallery.memories.data.local.db.PhotoEntity
 import gallery.memories.timeline.TimelineJson
-import org.json.JSONObject
 import java.math.BigInteger
 import java.security.MessageDigest
+import org.json.JSONObject
 
 /** Maps MediaStore rows to index entities and timeline JSON, deriving content IDs. */
 class PhotoMapper(private val ctx: Context) {
@@ -21,6 +22,9 @@ class PhotoMapper(private val ctx: Context) {
 
         /** Seconds per day; dayId is the epoch day index shared with the server. */
         private const val SECONDS_PER_DAY = 86400
+
+        /** Same precedence as Exif::parseExifDate on the server; ModifyDate must stay out. */
+        private val EXIF_DATE_TAGS = listOf(ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED)
     }
 
     /**
@@ -31,18 +35,16 @@ class PhotoMapper(private val ctx: Context) {
      */
     fun exifOf(image: SystemImage): ExifInterface? {
         if (image.isVideo) return null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                ctx.applicationContext.contentResolver.openInputStream(
-                    MediaStore.setRequireOriginal(image.uri),
-                )?.use { return ExifInterface(it) }
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Location permission missing, EXIF redacted (${image.baseName})")
-            } catch (e: UnsupportedOperationException) {
-                Log.w(TAG, "setRequireOriginal unsupported (${image.baseName}): ${e.message}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to read original EXIF (${image.baseName}): ${e.message}")
-            }
+        try {
+            ctx.applicationContext.contentResolver.openInputStream(
+                MediaStore.setRequireOriginal(image.uri),
+            )?.use { return ExifInterface(it) }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Location permission missing, EXIF redacted (${image.baseName})")
+        } catch (e: UnsupportedOperationException) {
+            Log.w(TAG, "setRequireOriginal unsupported (${image.baseName}): ${e.message}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read original EXIF (${image.baseName}): ${e.message}")
         }
         try {
             ctx.applicationContext.contentResolver.openInputStream(image.uri)?.use { return ExifInterface(it) }
@@ -70,26 +72,28 @@ class PhotoMapper(private val ctx: Context) {
         return null
     }
 
-    /** EXIF capture time (UTC) falling back to MediaStore time shifted into UTC. */
+    /**
+     * EXIF capture time (UTC) falling back to MediaStore time shifted into UTC.
+     * DATE_TAKEN is null for files with no capture date, so use mtime like the server.
+     */
     fun utcDate(image: SystemImage, exif: ExifInterface?): Long {
-        if (exif != null) {
-            val exifDate = try {
-                exif.getAttribute(ExifInterface.TAG_DATETIME)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to read EXIF datetime: ${e.message}")
-                null
+        exif?.let { exifDate(it) }?.let { return it }
+        val time = if (image.dateTaken != 0L) image.dateTaken else image.mtime * 1000
+        return (time + TimeZone.getDefault().getOffset(time).toLong()) / 1000
+    }
+
+    private fun exifDate(exif: ExifInterface): Long? = try {
+        EXIF_DATE_TAGS
+            .firstNotNullOfOrNull { tag -> exif.getAttribute(tag)?.takeUnless { it.startsWith("0000:00:00") } }
+            ?.let { date ->
+                @SuppressLint("SimpleDateFormat") // Fixed EXIF format with ULocale.ROOT
+                val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", ULocale.ROOT)
+                sdf.timeZone = TimeZone.GMT_ZONE
+                sdf.parse(date)?.let { it.time / 1000 }
             }
-            if (exifDate != null) {
-                try {
-                    val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss")
-                    sdf.timeZone = TimeZone.GMT_ZONE
-                    sdf.parse(exifDate)?.let { return it.time / 1000 }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to parse EXIF datetime: ${e.message}")
-                }
-            }
-        }
-        return (image.dateTaken + TimeZone.getDefault().getOffset(image.dateTaken).toLong()) / 1000
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to read EXIF datetime: ${e.message}")
+        null
     }
 
     /** Content ID: identical file bytes share an auid wherever they appear. */
@@ -123,7 +127,7 @@ class PhotoMapper(private val ctx: Context) {
             buid = buid(image, exif),
             mtime = image.mtime,
             dateTaken = taken,
-            dayId = taken / SECONDS_PER_DAY,
+            dayId = taken.floorDiv(SECONDS_PER_DAY),
             baseName = image.baseName,
             bucketId = image.bucketId,
             bucketName = image.bucketName,
@@ -143,6 +147,7 @@ class PhotoMapper(private val ctx: Context) {
             .put(TimelineJson.Photo.SIZE, image.size)
             .put(TimelineJson.Photo.ETAG, image.mtime.toString())
             .put(TimelineJson.Photo.EPOCH, image.epoch)
+            .put(TimelineJson.Photo.LOCAL_URI, image.uri.toString())
         if (image.isVideo) {
             obj.put(TimelineJson.Photo.ISVIDEO, 1)
                 .put(TimelineJson.Photo.VIDEO_DURATION, image.videoDuration / 1000)
@@ -152,11 +157,7 @@ class PhotoMapper(private val ctx: Context) {
 
     /** Container location (e.g. "+37.421998-122.084000/"), tried unredacted first. */
     private fun videoLatLong(image: SystemImage): DoubleArray? {
-        val uris = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            listOf(MediaStore.setRequireOriginal(image.uri), image.uri)
-        } else {
-            listOf(image.uri)
-        }
+        val uris = listOf(MediaStore.setRequireOriginal(image.uri), image.uri)
         for (uri in uris) {
             val retriever = MediaMetadataRetriever()
             try {

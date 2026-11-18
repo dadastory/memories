@@ -1,4 +1,5 @@
 import * as base from './base';
+import * as xml from './xml';
 
 import axios from '@nextcloud/axios';
 import { showError } from '@services/utils/dialog';
@@ -16,6 +17,8 @@ import type { IAlbum, IFileInfo, IPhoto } from '@typings';
 import type { AbortOpts } from '@services/utils/abort';
 
 export type IDavAlbum = {
+  basename: string;
+  filename: string;
   location: string;
   collaborators: {
     id: string;
@@ -141,72 +144,32 @@ export async function* removeFromAlbum(user: string, name: string, photos: IPhot
 /**
  * Create an album.
  */
-export async function createAlbum(albumName: string, opts?: { rethrow?: boolean } & AbortOpts) {
-  try {
-    await client.createDirectory(`/photos/${utils.uid}/albums/${albumName}`, { signal: opts?.signal });
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    if (opts?.rethrow) throw error;
-    console.error(error);
-    showError(t('memories', 'Failed to create {albumName}.', { albumName }));
-  }
+export async function createAlbum(albumName: string, opts?: AbortOpts) {
+  await client.createDirectory(`/photos/${utils.uid}/albums/${albumName}`, { signal: opts?.signal });
 }
 
 /**
  * Update an album's properties.
  *
- * @param {object} album Album to update
- * @param {object} data destructuring object
- * @param {string} data.albumName - The name of the album.
- * @param {object} data.properties - The properties to update.
+ * @param album Album to update
+ * @param properties The properties to update
  */
-export async function updateAlbum(album: any, { albumName, properties }: any, opts?: AbortOpts) {
-  const stringifiedProperties = Object.entries(properties)
-    .map(([name, valueRaw]) => {
-      let value: string;
-      switch (typeof valueRaw) {
-        case 'string':
-          value = utils.escapeXml(valueRaw);
-          return `<nc:${name}>${value}</nc:${name}>`;
-        case 'object':
-          value = utils.escapeXml(JSON.stringify(valueRaw));
-          return `<nc:${name}>${value}</nc:${name}>`;
-        default:
-          return String();
-      }
-    })
-    .join('');
+export async function updateAlbum(
+  album: { filename: string },
+  properties: Partial<Pick<IDavAlbum, 'location' | 'collaborators'>>,
+  opts?: AbortOpts,
+): Promise<void> {
+  const { location, collaborators } = properties;
 
-  try {
-    opts?.signal?.throwIfAborted();
-    await client.customRequest(album.filename, {
-      method: 'PROPPATCH',
-      data: `<?xml version="1.0"?>
-                        <d:propertyupdate xmlns:d="DAV:"
-                            xmlns:oc="http://owncloud.org/ns"
-                            xmlns:nc="http://nextcloud.org/ns"
-                            xmlns:ocs="http://open-collaboration-services.org/ns">
-                        <d:set>
-                            <d:prop>
-                                ${stringifiedProperties}
-                            </d:prop>
-                        </d:set>
-                        </d:propertyupdate>`,
-      signal: opts?.signal,
-    });
-
-    return album;
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    console.error(error);
-    showError(
-      t('memories', 'Failed to update properties of {albumName} with {properties}.', {
-        albumName,
-        properties: JSON.stringify(properties),
-      }),
-    );
-    return album;
-  }
+  opts?.signal?.throwIfAborted();
+  await client.customRequest(album.filename, {
+    method: 'PROPPATCH',
+    data: xml.propertyUpdate({
+      'nc:location': location,
+      'nc:collaborators': collaborators && JSON.stringify(collaborators),
+    }),
+    signal: opts?.signal,
+  });
 }
 
 /**
@@ -215,18 +178,8 @@ export async function updateAlbum(album: any, { albumName, properties }: any, op
  * @param name Name of album (or ID)
  */
 export async function getAlbum(user: string, name: string, opts?: AbortOpts): Promise<IDavAlbum> {
-  const req = `<?xml version="1.0"?>
-        <d:propfind xmlns:d="DAV:"
-            xmlns:oc="http://owncloud.org/ns"
-            xmlns:nc="http://nextcloud.org/ns"
-            xmlns:ocs="http://open-collaboration-services.org/ns">
-            <d:prop>
-                <nc:location />
-                <nc:collaborators />
-            </d:prop>
-        </d:propfind>`;
   let album = (await client.stat(getAlbumPath(user, name), {
-    data: req,
+    data: xml.propfind(['nc:location', 'nc:collaborators']),
     details: true,
     signal: opts?.signal,
   })) as any;
@@ -248,34 +201,22 @@ export async function getAlbum(user: string, name: string, opts?: AbortOpts): Pr
 }
 
 /** Rename an album */
-export async function renameAlbum(album: any, currentAlbumName: string, newAlbumName: string, opts?: AbortOpts) {
-  const newAlbum = { ...album, basename: newAlbumName };
-  try {
-    opts?.signal?.throwIfAborted();
-    const filenameBefore = `/photos/${utils.uid}/albums/${currentAlbumName}`;
-    const filenameAfter = `/photos/${utils.uid}/albums/${newAlbumName}`;
-    await client.moveFile(filenameBefore, filenameAfter, { signal: opts?.signal });
-    newAlbum.filename = filenameAfter;
-    return newAlbum;
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    console.error(error);
-    showError(
-      t('memories', 'Failed to rename {currentAlbumName} to {newAlbumName}.', {
-        currentAlbumName,
-        newAlbumName,
-      }),
-    );
-    return album;
-  }
+export async function renameAlbum<T extends object>(
+  album: T,
+  currentAlbumName: string,
+  newAlbumName: string,
+  opts?: AbortOpts,
+): Promise<T> {
+  opts?.signal?.throwIfAborted();
+  const filenameBefore = `/photos/${utils.uid}/albums/${currentAlbumName}`;
+  const filenameAfter = `/photos/${utils.uid}/albums/${newAlbumName}`;
+  await client.moveFile(filenameBefore, filenameAfter, { signal: opts?.signal });
+  return { ...album, basename: newAlbumName, filename: filenameAfter };
 }
 
 /** Get fileinfo objects from album photos */
 export function getAlbumFileInfos(photos: IPhoto[], albumUser: string, albumName: string): IFileInfo[] {
-  const collection =
-    albumUser === utils.uid
-      ? `/photos/${utils.uid}/albums/${albumName}`
-      : `/photos/${utils.uid}/sharedalbums/${albumName} (${albumUser})`;
+  const collection = getAlbumPath(albumUser, albumName);
 
   return photos.map((photo) => {
     const basename = `${photo.fileid}-${photo.basename}`;

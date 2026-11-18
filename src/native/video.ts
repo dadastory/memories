@@ -1,43 +1,28 @@
-import { NAPI, nativex } from './api';
-import { addOrigin } from './basic';
-import { has } from './api';
-import { config } from '@services/user-config';
+import { NAPI, has } from './api';
 import { isLikelySamePhoto, isLocalPhoto } from '@services/utils/photo';
 import type { IPhoto } from '@typings';
 
 /**
- * Play a video from the given URL.
- * @param photo Photo to play
- * @param urls URLs to play (remote)
- */
-export async function playVideo(photo: IPhoto, urls: string[]) {
-  const loop = config.video_loop || false;
-  if (typeof nativex?.playVideo2 === 'function') {
-    nativex?.playVideo2?.(photo.auid ?? String(), photo.fileid, JSON.stringify(urls.map(addOrigin)), loop);
-  } else {
-    nativex?.playVideo?.(photo.auid ?? String(), photo.fileid, JSON.stringify(urls.map(addOrigin)));
-  }
-}
-
-/**
- * Destroy the video player.
- */
-export async function destroyVideo(photo: IPhoto) {
-  nativex?.destroyVideo?.(photo.fileid);
-}
-
-/**
- * Local video URL for vidstack, if the photo should play from device.
+ * Local video URL for the native player, if the photo should play from device.
+ * The native hole player reads the content URI directly; the web player needs the proxy.
  * Returns null for remote-only videos (use HLS / direct instead).
  */
-export function getLocalVideoUrl(photo: IPhoto): string | null {
+export function getLocalVideoUrl(photo: IPhoto, nativeHole: boolean): string | null {
   if (!has() || !photo) {
     return null;
   } else if (isLocalPhoto(photo)) {
-    return NAPI.VIDEO_FULL(photo.fileid);
+    return localVideoUrl(photo, nativeHole);
   } else if (isLikelySamePhoto(photo, photo.local_photo)) {
-    return NAPI.VIDEO_FULL(photo.local_photo.fileid);
+    return localVideoUrl(photo.local_photo, nativeHole);
   } else {
     return null;
+  }
+}
+
+function localVideoUrl(photo: IPhoto, nativeHole: boolean): string {
+  if (nativeHole && photo.local_uri) {
+    return photo.local_uri;
+  } else {
+    return NAPI.VIDEO_FULL(photo.fileid);
   }
 }

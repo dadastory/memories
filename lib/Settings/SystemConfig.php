@@ -43,9 +43,12 @@ final class SystemConfig
         // Path to index (only used if indexing mode is 3)
         'memories.index.path' => '/',
 
-        // Blocklist folder names by SQL LIKE pattern.
+        // Blocklist file or folder names by SQL LIKE pattern.
         // % and _ are wildcards, \ escapes
         'memories.index.folder.blocklist' => ['@Recycle', '@eaDir', '.trashed-%'],
+
+        // Blocklist MIME types from indexing, e.g. ['image/png', 'image/gif']
+        'memories.index.mime.blocklist' => [],
 
         // Places database type identifier
         'memories.gis_type' => -1,
@@ -83,6 +86,7 @@ final class SystemConfig
         'memories.vod.nvenc' => false,  // Transcode with NVIDIA NVENC
         'memories.vod.nvenc.temporal_aq' => false,
         'memories.vod.nvenc.scale' => 'cuda', // cuda or npp
+        'memories.vod.nvenc.tonemap_cuda' => true, // tonemap_cuda (jellyfin/ffmpeg)
 
         // Extra streaming configuration
         'memories.vod.use_transpose' => false,
@@ -95,6 +99,19 @@ final class SystemConfig
 
         // Path to go-vod binary
         'memories.vod.path' => '',
+
+        // Path to VIPS binary
+        'memories.vips.path' => '',
+
+        // Execute the VIPS binary in place instead of copying it to the temp dir
+        // Useful e.g. with SELinux, where the copy loses its file label
+        'memories.vips.direct' => false,
+
+        // Use the built-in VIPS binary for previews
+        'memories.vips.enabled' => true,
+
+        // Use the built-in VIPS binary for camera RAW previews
+        'memories.vips.raw.enabled' => true,
 
         // Path to use for transcoded files (/tmp/go-vod/instanceid)
         // Make sure this has plenty of space
@@ -116,6 +133,24 @@ final class SystemConfig
         // Mark go-vod as external. If true, Memories will not attempt to
         // start go-vod if it is not running already.
         'memories.vod.external' => false,
+
+        // Serve go-vod file reads over persistent PHP workers.
+        // Only used by the internal transcoder; an external transcoder
+        // should use the env var GO_VOD_BRIDGE_ENABLED instead.
+        'memories.vod.bridge.enabled' => true,
+        // Max concurrent bridge workers; reads wait when all are busy.
+        // External transcoder: GO_VOD_BRIDGE_MAX_WORKERS.
+        'memories.vod.bridge.max_workers' => 4,
+        // Bridge workers kept warm when idle.
+        // External transcoder: GO_VOD_BRIDGE_MIN_WORKERS.
+        'memories.vod.bridge.min_workers' => 1,
+        // Max lifetime of a bridge worker in seconds (at most 300).
+        // Keep it below web server timeouts (e.g. fastcgi_read_timeout).
+        // External transcoder: GO_VOD_BRIDGE_WORKER_TTL.
+        'memories.vod.bridge.worker_ttl' => 30,
+        // Seconds that bridge workers above min_workers stay idle.
+        // External transcoder: GO_VOD_BRIDGE_IDLE_TIME.
+        'memories.vod.bridge.idle_time' => 5,
 
         // Quality Factor used for transcoding
         // This corresponds to CRF for x264 and global_quality for VA-API
@@ -299,6 +334,14 @@ final class SystemConfig
         }
 
         return $url;
+    }
+
+    /** Get the user's map cluster density, clamped to a sane range. */
+    public function getUserMapClusterDensity(): int
+    {
+        $density = (int) $this->getUserConfigValue('mapClusterDensity', '1');
+
+        return min(16, max(1, $density));
     }
 
     /** Get the effective video autoplay state for a user. */

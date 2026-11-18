@@ -10,10 +10,18 @@ use OC\Files\Search\SearchQuery;
 use OCP\Files\Node;
 use OCP\Files\Search\ISearchBinaryOperator;
 use OCP\Files\Search\ISearchComparison;
+use Symfony\Component\HttpFoundation\HeaderUtils;
+use Symfony\Component\String\UnicodeString;
 
 class StaticUtil
 {
     public const string ARCHIVE_FOLDER = '.archive';
+
+    public const string MEMORIES_MANIFEST_VERSION = 'X-Memories-Manifest-Version';
+    public const string MANIFEST_VERSION_UNKNOWN = 'unknown';
+
+    public const string DISPOSITION_INLINE = 'inline';
+    public const string DISPOSITION_ATTACHMENT = 'attachment';
 
     /**
      * Get host CPU architecture (amd64 or aarch64).
@@ -38,20 +46,34 @@ class StaticUtil
      *
      * @psalm-return 'glibc'|'musl'|null
      */
-    public static function getLibc(): ?string
-    {
-        // glibc -> stdout, musl -> stderr
-        $output = self::execSafe2(['ldd', '--version'], 3000, null, true, true);
+    public static function getLibc(
+        ?string $lddVersion = null,
+        ?string $gnuLibcGetconf = null,
+    ): ?string {
+        $muslRe = '/\b(musl)\b/i';
+        $glibcRe = '/\b(glibc|gnu libc)\b/i';
 
-        // check in either
-        $ldd = strtolower($output[0] ?? '')
-            .strtolower($output[1] ?? '');
+        try {
+            $lddVersion ??= implode(' ', self::execSafe2(['ldd', '--version'], 3000, null, [1, 2]));
 
-        if (str_contains($ldd, 'musl')) {
-            return 'musl';
+            if (preg_match($muslRe, $lddVersion)) {
+                return 'musl';
+            }
+            if (preg_match($glibcRe, $lddVersion)) {
+                return 'glibc';
+            }
+        } catch (\Exception) {
+            // ldd missing or failed, try getconf
         }
-        if (str_contains($ldd, 'glibc')) {
-            return 'glibc';
+
+        try {
+            $gnuLibcGetconf ??= implode(' ', self::execSafe2(['getconf', 'GNU_LIBC_VERSION'], 3000, null, [1]));
+
+            if (preg_match($glibcRe, $gnuLibcGetconf)) {
+                return 'glibc';
+            }
+        } catch (\Exception) {
+            // getconf missing or failed, libc unknown
         }
 
         return null;
@@ -211,26 +233,43 @@ class StaticUtil
     /**
      * Execute a command safely.
      *
-     * @param string[] $cmd     command to execute
-     * @param int      $timeout milliseconds
-     * @param ?string  $stdin   standard input
+     * @param list<string> $cmd     command to execute
+     * @param int          $timeout milliseconds
+     * @param ?string      $stdin   standard input
      *
-     * @return string standard output
+     * @return ?string standard output
      *
      * @throws \Exception on error
      */
     public static function execSafe(array $cmd, int $timeout, ?string $stdin = null): ?string
     {
-        return self::execSafe2($cmd, $timeout, $stdin, true, false)[0];
+        return self::execSafe2($cmd, $timeout, $stdin, [1])[1] ?? null;
     }
 
-    /** Exec safe with extra options */
-    public static function execSafe2(array $cmd, int $timeout, ?string $stdin, bool $rstdout, bool $rstderr): array
+    /**
+     * Exec safe with extra options.
+     *
+     * @param list<string> $cmd     command to execute
+     * @param int          $timeout milliseconds
+     * @param ?string      $stdin   standard input
+     * @param list<int>    $capture FD numbers to capture, e.g. [1, 2]
+     *
+     * @return array<int,?string> captured output keyed by FD
+     *
+     * @throws \Exception on error
+     */
+    public static function execSafe2(array $cmd, int $timeout, ?string $stdin, array $capture): array
     {
-        $config = [
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
+        $config = [];
+        foreach ($capture as $fd) {
+            $config[$fd] = ['pipe', 'w'];
+        }
+
+        foreach ([1, 2] as $fd) {
+            if (!isset($config[$fd])) {
+                $config[$fd] = ['null'];
+            }
+        }
         if (null !== $stdin) {
             $config[0] = ['pipe', 'r'];
         }
@@ -240,30 +279,28 @@ class StaticUtil
         if (!\is_resource($proc)) {
             throw new \Exception('proc_open failed: '.implode(' ', $cmd));
         }
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
+        foreach ($capture as $fd) {
+            stream_set_blocking($pipes[$fd], false);
+        }
 
         if (null !== $stdin) {
-            fwrite($pipes[0], $stdin);
-            fclose($pipes[0]);
+            $in = $pipes[0];
+            fwrite($in, $stdin);
+            fclose($in);
         }
 
         try {
-            $output = [null, null];
-
-            if ($rstdout) {
-                $output[0] = self::readOrTimeout($pipes[1], $timeout);
-            }
-            if ($rstderr) {
-                $output[1] = self::readOrTimeout($pipes[2], $timeout);
+            $output = [];
+            foreach ($capture as $fd) {
+                $output[$fd] = self::readOrTimeout($pipes[$fd], $timeout);
             }
 
             return $output;
-        } catch (\Exception $ex) {
-            throw $ex;
         } finally {
-            fclose($pipes[1]);
-            fclose($pipes[2]);
+            foreach ($capture as $fd) {
+                $pipe = $pipes[$fd];
+                fclose($pipe);
+            }
             proc_terminate($proc);
             proc_close($proc);
         }
@@ -309,11 +346,26 @@ class StaticUtil
             }
 
             // Append to buffer
-            if ($contents = stream_get_contents($handle)) {
-                $buffer .= $contents;
-            }
+            $buffer .= (string) stream_get_contents($handle);
         }
 
         throw new \Exception('Timeout');
+    }
+
+    /**
+     * Get RFC 6266 Content-Disposition header value for a filename.
+     *
+     * @param self::DISPOSITION_* $disposition
+     */
+    public static function getContentDisposition(
+        string $filename,
+        string $disposition = self::DISPOSITION_INLINE,
+    ): string {
+        $sanitized = str_replace(['/', '\\'], '-', $filename);
+        $ascii = (new UnicodeString($sanitized))->ascii()->toString();
+        $ascii = str_replace(['/', '\\'], '-', $ascii);
+        $fallback = preg_replace(['/%/', '/[^\x20-\x7e]/'], ['', '_'], $ascii) ?: 'file';
+
+        return HeaderUtils::makeDisposition($disposition, $sanitized, $fallback);
     }
 }

@@ -99,15 +99,23 @@
 
     <div>
       {{ t('memories', 'Folders with a ".nomedia" or a ".nomemories" file are always excluded from indexing.') }}
-      {{ t('memories', 'You can optionally exclude specific folder names from being indexed.') }}
+      {{ t('memories', 'You can optionally exclude specific file or folder names from being indexed.') }}
       <br />
 
       <NcTextField
         class="regex-field"
-        :label="t('memories', 'Excluded folder names (comma-separated)')"
+        :label="t('memories', 'Excluded file or folder names (comma-separated)')"
         :label-visible="true"
         v-model="blocklistText"
         @change="update('memories.index.folder.blocklist')"
+      />
+
+      <NcTextField
+        class="regex-field"
+        :label="t('memories', 'Excluded MIME types (comma-separated)')"
+        :label-visible="true"
+        v-model="mimeBlocklistText"
+        @change="update('memories.index.mime.blocklist')"
       />
     </div>
 
@@ -163,6 +171,19 @@ const blocklistText = computed({
   set(value: string) {
     if (!systemConfig.value) return;
     systemConfig.value['memories.index.folder.blocklist'] = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== '');
+  },
+});
+
+const mimeBlocklistText = computed({
+  get(): string {
+    return (systemConfig.value?.['memories.index.mime.blocklist'] ?? []).join(', ');
+  },
+  set(value: string) {
+    if (!systemConfig.value) return;
+    systemConfig.value['memories.index.mime.blocklist'] = value
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s !== '');

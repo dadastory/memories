@@ -80,26 +80,28 @@ function serialized<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Wait until a history.go() navigation commits (or a tick passes when it
- * produces no navigation, e.g. already at the oldest entry).
+ * Go back in history and wait until the navigation commits.
+ *
+ * Skips the navigation when there is nowhere to go back to, using the
+ * position vue-router keeps in history.state. A short timeout here is not
+ * safe: on a slow browser the traversal can commit after we have moved on,
+ * reverting any navigation done in the meantime.
  */
-function waitForHistoryGo(go: () => void): Promise<void> {
+function historyBack(delta: number): Promise<void> {
   return new Promise<void>((resolve) => {
-    let done = false;
-    const off = router.afterEach(() => {
-      if (done) return;
-      done = true;
+    const position = window.history.state?.position;
+    if (typeof position === 'number' && position < delta) {
+      return resolve();
+    }
+
+    const finish = () => {
       off();
+      clearTimeout(timer);
       resolve();
-    });
-    go();
-    // Fallback: go() is a no-op when there is nowhere to go back to.
-    setTimeout(() => {
-      if (done) return;
-      done = true;
-      off();
-      resolve();
-    }, 50);
+    };
+    const off = router.afterEach(finish);
+    const timer = setTimeout(finish, 2000);
+    router.go(-delta);
   });
 }
 
@@ -151,7 +153,7 @@ export const fragment = {
    */
   async clear() {
     if (_m.mode !== 'user') return;
-    router.replace({
+    await router.replace({
       path: router.currentRoute.value.path,
       query: router.currentRoute.value.query,
     });
@@ -255,7 +257,7 @@ async function popCore(type: FragmentType) {
   // below observes the post-navigation state and not a stale URL.
   // Without this, concurrent pops compute duplicate relative jumps
   // against the same stale URL and over-consume history entries.
-  await waitForHistoryGo(() => router.go(-frag.index! - 1));
+  await historyBack(frag.index! + 1);
 
   // Check if the fragment still exists
   // In that case, replace the route to remove the fragment
@@ -272,29 +274,37 @@ async function popCore(type: FragmentType) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-onDOMLoaded(() => {
-  // Skip unless in user mode
-  if (_m.mode !== 'user') return;
-
+async function keepOnlyContextualFragments() {
   // On first load, we must remove any fragments and
   // push them back in, so that history.back() works.
   // The back button will still take the user back to
   // the previous page but this is fine.
-  if (fragment.list.length) {
-    const contextual = fragment.list.filter((frag) => [FragmentType.viewer, FragmentType.day].includes(frag.type));
+  if (!fragment.list.length) return;
 
-    // Remove the currently present fragments
-    fragment.clear();
+  // These fragments should be kept on page reload.
+  const contextual = fragment.list.filter((frag) => [FragmentType.viewer, FragmentType.day].includes(frag.type));
 
-    // Only contextual fragments should be present on page load
-    if (contextual.length) {
-      router.push({
-        path: router.currentRoute.value.path,
-        query: router.currentRoute.value.query,
-        hash: encodeFragment(contextual),
-      });
-    }
+  // Remove all fragments and push back only the contextual ones
+  await fragment.clear();
+
+  if (contextual.length) {
+    await router.push({
+      path: router.currentRoute.value.path,
+      query: router.currentRoute.value.query,
+      hash: encodeFragment(contextual),
+    });
   }
+}
+
+onDOMLoaded(async () => {
+  // Skip unless in user mode
+  if (_m.mode !== 'user') return;
+
+  // Wait for router to be ready before initializing the fragment service.
+  await serialized(async () => {
+    await router.isReady().catch(() => {});
+    await keepOnlyContextualFragments();
+  });
 
   /**
    * Trigger when route changes; notify listeners of popped fragments.

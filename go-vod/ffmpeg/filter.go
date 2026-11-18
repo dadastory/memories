@@ -63,7 +63,9 @@ func (b *FilterBuilder) hwdownload() {
 
 // normalize enters the encode domain: 8-bit convert plus hardware upload.
 // Emitted without checking isInHw: it also covers decoders that fell back
-// to software frames.
+// to software frames. Software stays yuv420p: older ffmpeg swscale zeroes
+// chroma on same-size nv12->nv12 conversions (e.g. untagged range -> tv),
+// turning max-size renditions green.
 func (b *FilterBuilder) normalize() {
 	switch b.cv {
 	case EncoderVAAPI:
@@ -71,7 +73,7 @@ func (b *FilterBuilder) normalize() {
 	case EncoderNVENC:
 		b.append("format=nv12|cuda", "hwupload")
 	default:
-		b.append("format=nv12")
+		b.append("format=yuv420p")
 	}
 }
 
@@ -102,7 +104,7 @@ func (b *FilterBuilder) scaleAspect() []string {
 	if b.s.DisplayDimensions {
 		return nil
 	}
-	return []string{"force_original_aspect_ratio=decrease"}
+	return []string{"force_original_aspect_ratio=decrease", "force_divisible_by=2"}
 }
 
 // scaleEncode renders the downscale in the encode domain: hardware per
@@ -127,6 +129,10 @@ func (b *FilterBuilder) scaleEncode(format string) {
 	// scaler must preserve source depth (e.g. HDR before tonemap).
 	if b.cv != EncoderX264 {
 		args = append(args, fmt.Sprintf("format=%s", format))
+		b.bitDepth = 8
+		if strings.HasPrefix(format, "p010") {
+			b.bitDepth = 10
+		}
 	}
 
 	// The CUDA scaler needs an explicit passthrough opt-out.
@@ -169,6 +175,10 @@ func (b *FilterBuilder) tonemapOpenCL() {
 		"tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv",
 		"hwmap=derive_device=vaapi:reverse=1",
 	)
+}
+
+func (b *FilterBuilder) tonemapCUDA() {
+	b.append("tonemap_cuda=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv")
 }
 
 // transposePlan resolves Rotation to filters; sw reports CPU transpose,

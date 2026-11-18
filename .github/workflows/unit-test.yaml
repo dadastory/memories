@@ -2,6 +2,7 @@
 name: unit test
 on:
   push:
+    branches: [master]
     paths-ignore:
       - 'docs/**'
       - 'go-vod/**'
@@ -15,6 +16,10 @@ on:
       - 'android/**'
       - 'mkdocs.yml'
       - '**.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   unit-test:
@@ -32,19 +37,19 @@ jobs:
 
     steps:
       - name: Checkout server
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
           repository: nextcloud/server
           ref: ${{ matrix.server-versions }}
 
       - name: Checkout the app
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: apps/memories
 
       - name: Set up php ${{ matrix.php-versions }}
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: ${{ matrix.php-versions }}
           extensions: mbstring, iconv, fileinfo, intl, sqlite, pdo_sqlite
@@ -64,6 +69,18 @@ jobs:
             --admin-user admin \
             --admin-pass password
           php occ app:enable memories
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        working-directory: apps/memories
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ hashFiles('apps/memories/composer.lock') }}
+          restore-keys: composer-
 
       - name: Install dependencies
         working-directory: apps/memories

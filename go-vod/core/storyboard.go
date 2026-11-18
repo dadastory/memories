@@ -32,6 +32,8 @@ type StoryboardInput struct {
 	Input        string
 	Headers      string
 	Duration     time.Duration
+	Width        int
+	Height       int
 	FFmpeg       string
 	LogID        string
 }
@@ -61,7 +63,7 @@ type storyboardFile struct {
 }
 
 func (m *Manager) storyboardInput() StoryboardInput {
-	return StoryboardInput{
+	in := StoryboardInput{
 		CacheDir:     m.c.CacheDir(),
 		FileID:       m.fileid,
 		Etag:         m.etag,
@@ -69,10 +71,14 @@ func (m *Manager) storyboardInput() StoryboardInput {
 		ServiceToken: m.getServiceToken(),
 		Input:        m.ffmpegInput(),
 		Headers:      m.inputHeaders(),
-		Duration:     m.probe.Duration,
 		FFmpeg:       m.c.FFmpeg,
 		LogID:        m.id,
 	}
+	if m.probe != nil {
+		in.Duration = m.probe.Duration
+		in.Width, in.Height = ffmpeg.StoryboardDisplaySize(m.probe.Width, m.probe.Height, m.probe.Rotation)
+	}
+	return in
 }
 
 // ServeStoryboard builds the storyboard on first view and serves the VTT
@@ -99,7 +105,6 @@ func (s *storyboardService) Serve(w http.ResponseWriter, r *http.Request, in Sto
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Cache-Control", "max-age=86400, public")
 	if leaf == StoryboardVTTFile {
 		file, err := LoadStoryboardPlan(in.CacheDir, in.FileID, in.Etag)
 		if err != nil {
@@ -107,12 +112,27 @@ func (s *storyboardService) Serve(w http.ResponseWriter, r *http.Request, in Sto
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		w.Header().Set("Cache-Control", "max-age=86400, public")
 		w.Header().Set("Content-Type", "text/vtt")
 		w.Write([]byte(file.Plan.VTT(query)))
 		return
 	}
+
+	// Errors must not carry the cache header, or they're cached for a day.
+	f, err := os.Open(filepath.Join(dir, leaf))
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "max-age=86400, public")
 	w.Header().Set("Content-Type", "image/jpeg")
-	http.ServeFile(w, r, filepath.Join(dir, leaf))
+	http.ServeContent(w, r, leaf, st.ModTime(), f)
 }
 
 // Ensure builds the storyboard once and returns its dir.
@@ -163,7 +183,7 @@ func LoadStoryboardPlan(cacheDir string, fileid int64, etag string) (storyboardF
 }
 
 func (s *storyboardService) build(dir string, in StoryboardInput) error {
-	plan := ffmpeg.PlanStoryboard(in.Duration)
+	plan := ffmpeg.PlanStoryboard(in.Duration, in.Width, in.Height)
 	start := time.Now()
 	log.Printf("%s: building storyboard (%d thumbs @ %.1fs)", in.LogID, plan.Count, plan.Interval)
 
@@ -220,10 +240,7 @@ func (s *storyboardService) build(dir string, in StoryboardInput) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, StoryboardPlanFile+".part"), data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(filepath.Join(dir, StoryboardPlanFile+".part"), filepath.Join(dir, StoryboardPlanFile))
+	return writeFileAtomic(filepath.Join(dir, StoryboardPlanFile), data)
 }
 
 func glob(pattern string) []string {

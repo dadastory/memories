@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +56,7 @@ type AudioInfo struct {
 type sideData struct {
 	SideDataType string `json:"side_data_type"`
 	Rotation     int    `json:"rotation"`
+	DVCompatID   *int   `json:"dv_bl_signal_compatibility_id"`
 }
 
 type videoStream struct {
@@ -91,9 +91,7 @@ func ProbeWithFormats(ctx context.Context, bin, fileURL, headers, formats string
 	if formats != "" {
 		args = append(args, "-format_whitelist", formats, "-protocol_whitelist", "http,https,tls,tcp")
 	}
-	if headers != "" {
-		args = append(args, "-headers", headers)
-	}
+	args = append(args, remoteInputArgs(headers)...)
 	args = append(args,
 		"-show_entries", "format:stream",
 		"-of", "json",
@@ -108,7 +106,7 @@ func ProbeWithFormats(ctx context.Context, bin, fileURL, headers, formats string
 
 // runFFprobe executes the binary, capturing stdout and stderr.
 func runFFprobe(ctx context.Context, bin string, args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := Command(ctx, bin, args...)
 	var out, serr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &serr
@@ -226,16 +224,11 @@ func probeHDR(s videoStream) bool {
 	case "smpte2084", "arib-std-b67":
 		return true
 	}
-	// Dolby Vision by codec or RPU side data, including profile 8 tucked
-	// into HEVC streams whose transfer tags look SDR alone. Explicit names
-	// only: prefix-matching "dv" would catch SDR dvvideo.
-	switch s.CodecName {
-	case "dvav", "dva1", "dvhe", "dvh1", "dvh2", "dvh3", "dvc1", "dav1":
-		return true
-	}
+	// Dolby Vision, notably profile 5 whose base layer has no SDR or HDR10
+	// transfer tags at all. An SDR-compatible base layer stays SDR.
 	for _, sd := range s.SideDataList {
-		if strings.Contains(strings.ToLower(sd.SideDataType), "dolby vision") {
-			return true
+		if sd.SideDataType == "DOVI configuration record" {
+			return sd.DVCompatID == nil || *sd.DVCompatID != 2 // 2: SDR base layer
 		}
 	}
 	if s.ColorSpace == "bt2020nc" || s.ColorSpace == "bt2020c" || s.ColorPrimaries == "bt2020" {
@@ -252,9 +245,7 @@ func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, er
 	args := []string{
 		"-v", "error",
 	}
-	if headers != "" {
-		args = append(args, "-headers", headers)
-	}
+	args = append(args, remoteInputArgs(headers)...)
 	args = append(args,
 		"-select_streams", "v:0",
 		"-show_entries", "packet=pts_time,flags",

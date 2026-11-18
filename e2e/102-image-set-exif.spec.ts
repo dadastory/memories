@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { randomBytes } from 'crypto';
-import { appUrl, e2eHeaders } from './navigation';
+import { test, appUrl, e2eHeaders } from './navigation';
 import { DavClient } from './utils';
 
 test.use({
@@ -22,11 +22,6 @@ test.describe('@api Image setExif', () => {
     // Generate random hex strings for description and title
     const randomDesc = randomBytes(16).toString('hex');
     const randomTitle = randomBytes(16).toString('hex');
-
-    // Get info and verify description doesn't match our random value
-    const before = await dav.imageInfo(fileid);
-    expect(before.exif?.Description).not.toBe(randomDesc);
-    expect(before.exif?.Title).not.toBe(randomTitle);
 
     // Set description and title using setExif
     const setRes = await request.patch(`${appUrl}/api/image/set-exif/${fileid}`, {

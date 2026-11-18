@@ -1,10 +1,9 @@
-import PhotoSwipe from 'photoswipe';
 import PsImage from './PsImage';
 
 import * as utils from '@services/utils/common';
 import { config } from '@services/user-config';
 
-import type { PsContent, PsEvent } from './types';
+import type { PsContent, PsEvent, PsPhotoSwipe } from './types';
 
 export function isLiveContent(content: PsContent): boolean {
   // Do not play Live Photo if the slideshow is
@@ -18,7 +17,7 @@ export function isLiveContent(content: PsContent): boolean {
 
 class LivePhotoContentSetup {
   constructor(
-    lightbox: PhotoSwipe,
+    lightbox: PsPhotoSwipe,
     private psImage: PsImage,
     private liveState: { playing: boolean; waiting: boolean },
   ) {
@@ -28,7 +27,7 @@ class LivePhotoContentSetup {
     lightbox.on('contentDestroy', (e) => this.onContentDestroy(e as unknown as PsEvent));
   }
 
-  async play(content: PsContent) {
+  public async play(content: PsContent) {
     const video = content.element?.querySelector('video');
     if (!video) return;
 
@@ -48,7 +47,7 @@ class LivePhotoContentSetup {
     }
   }
 
-  onContentLoad(e: PsEvent) {
+  private onContentLoad(e: PsEvent) {
     const content: PsContent = e.content;
     if (!isLiveContent(content)) return;
 
@@ -66,19 +65,16 @@ class LivePhotoContentSetup {
     video.src = utils.getLivePhotoVideoUrl(photo, true);
 
     const div = document.createElement('div');
-    div.className = 'memories-livephoto';
+    div.classList.add('pswp__img', 'memories-livephoto');
     div.appendChild(video);
     content.element = div;
 
     utils.setupLivePhotoHooks(video, this.liveState);
 
-    const img = this.psImage.getXImgElem(content, () => content.onLoaded());
-    div.appendChild(img);
-
-    content.element = div;
+    void this.psImage.createPreviewElement(content);
   }
 
-  onContentActivate({ content }: { content: PsContent }) {
+  private onContentActivate({ content }: { content: PsContent }) {
     if (!isLiveContent(content)) return;
 
     if (config.livephoto_autoplay) {
@@ -86,13 +82,13 @@ class LivePhotoContentSetup {
     }
   }
 
-  onContentDeactivate({ content }: PsEvent) {
+  private onContentDeactivate({ content }: PsEvent) {
     if (isLiveContent(content)) {
       content.element?.querySelector('video')?.pause();
     }
   }
 
-  onContentDestroy({ content }: PsEvent) {
+  private onContentDestroy({ content }: PsEvent) {
     if (isLiveContent(content)) {
       content.element?.remove();
     }

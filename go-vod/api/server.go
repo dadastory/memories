@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pulsejet/memories/go-vod/bridge"
 	"github.com/pulsejet/memories/go-vod/config"
 	"github.com/pulsejet/memories/go-vod/core"
 	"github.com/pulsejet/memories/go-vod/ffmpeg"
@@ -23,6 +24,7 @@ type Server struct {
 	cfg      *config.Config
 	server   *http.Server
 	reg      *core.Registry
+	bridge   *bridge.Bridge
 	idle     chan core.IdleEvent
 	exitCode int
 }
@@ -33,13 +35,20 @@ func NewServer(cfg *config.Config) *Server {
 
 	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent)}
 	s.reg = core.NewRegistry(cfg, s.idle)
+	if cfg.Bridge.Enabled {
+		s.bridge = bridge.New(cfg)
+	}
 	return s
 }
 
 func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /ping", s.handlePing)
 	mux.HandleFunc("POST /vod", s.handleVod)
+	if s.bridge != nil {
+		mux.Handle("GET /bridge", s.bridge)
+	}
 	return mux
 }
 
@@ -53,6 +62,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    status,
 		"version":   s.cfg.Version,
 		"latencyMs": latencyMs,
+	})
+}
+
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":  "healthy",
+		"version": s.cfg.Version,
 	})
 }
 
@@ -94,9 +111,17 @@ func (s *Server) handleVod(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 	leaf := req.Profile
 
+	var closeBridgeFile func()
 	fileURL := s.cfg.FileURL(req.FileID)
-	if req.Query.Liveid != "" {
+	switch {
+	case req.Query.Liveid != "":
 		fileURL = s.cfg.LiveURL(req.FileID, req.Query.Liveid)
+	case s.bridge != nil && req.GoVodAddress != "":
+		s.bridge.SetServer(req.GoVodAddress)
+		fileURL = s.bridge.FileURL(req.FileID)
+		closeBridgeFile = func() {
+			s.bridge.CloseFile(req.FileID)
+		}
 	}
 
 	if !validProfile(leaf) {
@@ -105,14 +130,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 	}
 
 	manager, err := s.reg.GetOrCreate(core.ManagerParams{
-		URL:            fileURL,
-		StreamID:       req.Client,
-		FileID:         req.FileID,
-		Etag:           req.Etag,
-		ServiceToken:   req.ServiceToken,
-		PlayableCodecs: core.ParseCodecs(req.Query.Codecs),
-		TConfig:        req.TConfig,
-		UsesTemp:       req.Query.Liveid != "",
+		URL:             fileURL,
+		StreamID:        req.Client,
+		FileID:          req.FileID,
+		Etag:            req.Etag,
+		ServiceToken:    req.ServiceToken,
+		PlayableCodecs:  core.ParseCodecs(req.Query.Codecs),
+		TConfig:         req.TConfig,
+		UsesTemp:        req.Query.Liveid != "",
+		CloseBridgeFile: closeBridgeFile,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -136,7 +162,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		body, err := VariantPlaylist(manager, req.TConfig, quality, query)
+		body, err := VariantPlaylist(manager, quality, query)
 		if errors.Is(err, core.ErrCopyPending) {
 			w.WriteHeader(http.StatusConflict)
 			return
@@ -146,7 +172,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 			return
 		}
 		WriteM3U8(w, body)
-	case strings.HasSuffix(leaf, ".ts"):
+	case strings.HasSuffix(leaf, "-init.m4s"):
+		quality, ok := ffmpeg.ParseInitName(leaf)
+		if !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !manager.ServeInit(w, quality) {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	case strings.HasSuffix(leaf, ".m4s"):
 		quality, id, err := ffmpeg.ParseSegmentName(leaf)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -170,7 +205,7 @@ func validProfile(leaf string) bool {
 	case leaf == "ignore" || leaf == "index.m3u8":
 		return true
 	case strings.HasSuffix(leaf, ".m3u8"),
-		strings.HasSuffix(leaf, ".ts"),
+		strings.HasSuffix(leaf, ".m4s"),
 		strings.HasSuffix(leaf, ".mp4"):
 		return true
 	case core.IsStoryboardLeaf(leaf):
@@ -192,7 +227,10 @@ func (s *Server) describeStatus() (string, int64) {
 		return err.Error(), elapsedMs()
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: s.cfg.Transport(),
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		log.Println("Error testing describe URL", err)
@@ -257,6 +295,9 @@ func (s *Server) Start() int {
 	ctx, cancel := context.WithDeadline(context.TODO(), time.Now().Add(5*time.Second))
 	defer cancel()
 	s.server.Shutdown(ctx)
+	if s.bridge != nil {
+		s.bridge.Close()
+	}
 
 	return s.exitCode
 }

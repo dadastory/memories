@@ -27,6 +27,8 @@ class AssetSyncCoordinator(
     companion object {
         private val TAG = AssetSyncCoordinator::class.java.simpleName
         const val MAX_PARALLEL = 8
+        private const val APPS_PREFIX = "/apps/memories/"
+        private const val CUSTOM_APPS_PREFIX = "/custom_apps/memories/"
     }
 
     /** One downloadable web asset: remote [href], verified against [hash] for JS. */
@@ -36,7 +38,7 @@ class AssetSyncCoordinator(
     data class CssAsset(val name: String, val href: String)
 
     /** One queued file download within [syncBlocking]. */
-    private data class DownloadTask(val dir: File, val name: String, val url: String, val hash: String?)
+    private data class DownloadTask(val dir: File, val name: String, val urls: List<String>, val hash: String?)
 
     /** Lifecycle: idle → downloading → ready | error. */
     @Volatile var status = "idle"
@@ -183,13 +185,12 @@ class AssetSyncCoordinator(
             val key = cache.snapshotKey(describe)
             val dir = cache.dirFor(baseUrl, key)
             val existing = cache.readDescribe(dir)?.takeIf { File(dir, ".ready").exists() }
-            if (existing != null && !cache.jsChanged(existing, describe) && !cache.cssChanged(existing, describe)) {
-                cache.pruneExcept(baseUrl, key)
-                status = "ready"
-                return true
+            if (existing == null || cache.jsChanged(existing, describe) || cache.cssChanged(existing, describe)) {
+                syncBlocking(describe, baseUrl, dir)
             }
-            syncBlocking(describe, baseUrl, dir)
+            // Pruning deletes any older snapshot, so it must not stay current.
             cache.pruneExcept(baseUrl, key)
+            current = key to dir
             status = "ready"
             return true
         } catch (e: Exception) {
@@ -203,6 +204,8 @@ class AssetSyncCoordinator(
     @Throws(Exception::class)
     private fun syncBlocking(describe: JSONObject, baseUrl: String, dir: File) {
         val origin = AssetCache.originOf(baseUrl)
+        val webRoot = AssetCache.webrootOf(baseUrl)
+        val appsPath = AssetCache.appsPathOf(describe)
         val js = parseJsAssets(describe)
         val css = parseCssAssets(describe)
 
@@ -233,7 +236,7 @@ class AssetSyncCoordinator(
                 prevFile.copyTo(File(jsDir, asset.name), overwrite = true)
                 reused++
             } else {
-                tasks.add(DownloadTask(jsDir, asset.name, absUrl(origin, asset.href), asset.hash))
+                tasks.add(DownloadTask(jsDir, asset.name, absUrls(origin, webRoot, asset.href, appsPath), asset.hash))
             }
         }
         for (asset in css) {
@@ -243,7 +246,7 @@ class AssetSyncCoordinator(
                 prevFile.copyTo(File(cssDir, asset.name), overwrite = true)
                 reused++
             } else {
-                tasks.add(DownloadTask(cssDir, asset.name, absUrl(origin, asset.href), null))
+                tasks.add(DownloadTask(cssDir, asset.name, absUrls(origin, webRoot, asset.href, appsPath), null))
             }
         }
         total = tasks.size
@@ -252,7 +255,7 @@ class AssetSyncCoordinator(
             val pool = Executors.newFixedThreadPool(minOf(tasks.size, MAX_PARALLEL))
             try {
                 val futures = tasks.map { t ->
-                    pool.submit { downloader.downloadTo(t.dir, t.name, t.url, t.hash) }
+                    pool.submit { downloader.downloadTo(t.dir, t.name, t.urls, t.hash) }
                 }
                 try {
                     for (f in futures) f.get()
@@ -299,7 +302,25 @@ class AssetSyncCoordinator(
         }
     }
 
-    /** Joins a manifest href onto the server origin; absolute hrefs pass through. */
-    private fun absUrl(origin: String, href: String): String =
-        if (href.startsWith("http://") || href.startsWith("https://")) href else origin + href
+    /**
+     * Candidate URLs for a manifest href joined onto the server origin; absolute hrefs pass through.
+     * Hrefs are pinned to /apps/memories/, so [appsPath] (the real install path) is tried first.
+     * The server may live under a subpath (webroot, e.g. /nextcloud): manifest hrefs do not
+     * include it, so [webRoot] is prepended unless the href already carries it.
+     */
+    private fun absUrls(origin: String, webRoot: String, href: String, appsPath: String?): List<String> {
+        if (href.startsWith("http://") || href.startsWith("https://")) return listOf(href)
+        val fullAppsPath = appsPath?.let {
+            if (webRoot.isNotEmpty() && !it.startsWith("$webRoot/")) "$webRoot$it" else it
+        }
+        val bare = if (webRoot.isNotEmpty() && href.startsWith("$webRoot/")) href.removePrefix(webRoot) else href
+        if (fullAppsPath != null && bare.startsWith(APPS_PREFIX)) {
+            val suffix = bare.removePrefix(APPS_PREFIX)
+            return listOf("$origin$fullAppsPath/$suffix", "$origin$webRoot$bare").distinct()
+        }
+        val full = if (webRoot.isNotEmpty() && !href.startsWith("$webRoot/")) "$origin$webRoot$href" else "$origin$href"
+        val urls = mutableListOf(full)
+        if (bare.startsWith(APPS_PREFIX)) urls.add("$origin$webRoot$CUSTOM_APPS_PREFIX${bare.removePrefix(APPS_PREFIX)}")
+        return urls.distinct()
+    }
 }

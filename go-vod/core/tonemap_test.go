@@ -43,7 +43,8 @@ func TestTonemapSelection(t *testing.T) {
 			require.Equal(t, !fail, spec.VAAPIOpenCL)
 			args := strings.Join(ffmpeg.BuildArgs(spec), " ")
 			if fail {
-				require.Contains(t, args, "hwdownload,format=nv12,scale=")
+				require.Contains(t, args, "-vf scale=")
+				require.NotContains(t, args, "hwaccel_output_format")
 				require.Contains(t, args, "zscale=")
 				require.NotContains(t, args, "opencl")
 			} else {
@@ -66,7 +67,7 @@ func TestTonemapSelection(t *testing.T) {
 }
 
 func TestTonemapProbeSkipped(t *testing.T) {
-	for _, kind := range []string{"sdr", "software", "nvenc", "copy", "software transpose"} {
+	for _, kind := range []string{"sdr", "software", "copy", "software transpose"} {
 		t.Run(kind, func(t *testing.T) {
 			s, count := tonemapStream(t, false)
 			switch kind {
@@ -74,8 +75,6 @@ func TestTonemapProbeSkipped(t *testing.T) {
 				s.m.probe.HDR = false
 			case "software":
 				s.m.tc.VAAPI = false
-			case "nvenc":
-				s.m.tc.VAAPI, s.m.tc.NVENC = false, true
 			case "copy":
 				s.quality = QUALITY_DIRECT
 				s.m.srcSegments = []ffmpeg.Segment{{Start: 0, Duration: 3}}
@@ -85,5 +84,87 @@ func TestTonemapProbeSkipped(t *testing.T) {
 			require.False(t, s.transcodeSpec(0, true).VAAPIOpenCL)
 			require.NoFileExists(t, count)
 		})
+	}
+}
+
+func TestCUDATonemapSelection(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		for _, forceSw := range []bool{false, true} {
+			s, count := tonemapStream(t, fail)
+			s.m.tc.VAAPI = false
+			s.m.tc.NVENC = true
+			s.m.tc.NVENCScale = "cuda"
+			s.m.tc.NVENCTonemapCUDA = true
+			s.m.tc.ForceSwTranspose = forceSw
+			s.m.probe.BitDepth = 10
+			results := make(chan ffmpeg.Spec, 8)
+			for range 8 {
+				go func() { results <- s.transcodeSpec(0, true) }()
+			}
+			for range 8 {
+				spec := <-results
+				require.Equal(t, !fail, spec.NVENCCUDA)
+				require.False(t, spec.VAAPIOpenCL)
+				args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+				require.Contains(t, args, "h264_nvenc")
+				if fail {
+					require.Contains(t, args, "-vf scale=")
+					require.NotContains(t, args, "hwaccel_output_format")
+					require.Contains(t, args, "zscale=")
+					require.NotContains(t, args, "tonemap_cuda")
+				} else {
+					require.Contains(t, args, "tonemap_cuda=")
+					require.Contains(t, args, "hwdownload,format=nv12,transpose=1,format=nv12|cuda,hwupload")
+					require.NotContains(t, args, "zscale=")
+				}
+			}
+			require.Equal(t, !fail, s.transcodeSpec(12, true).NVENCCUDA)
+			require.Equal(t, !fail, s.transcodeSpec(0, false).NVENCCUDA)
+			data, err := os.ReadFile(count)
+			require.NoError(t, err)
+			require.Equal(t, "call\n", string(data))
+
+			other := &Stream{c: s.c, m: s.m, quality: QUALITY_MAX}
+			require.Equal(t, !fail, other.transcodeSpec(0, true).NVENCCUDA)
+			data, err = os.ReadFile(count)
+			require.NoError(t, err)
+			require.Equal(t, "call\ncall\n", string(data))
+		}
+	}
+}
+
+func TestCUDATonemapProbeSkipped(t *testing.T) {
+	for _, copy := range []bool{false, true} {
+		s, count := tonemapStream(t, false)
+		s.m.tc.VAAPI, s.m.tc.NVENC = false, true
+		if copy {
+			s.quality = QUALITY_DIRECT
+			s.m.srcSegments = []ffmpeg.Segment{{Start: 0, Duration: 3}}
+		} else {
+			s.m.probe.HDR = false
+		}
+		require.False(t, s.transcodeSpec(0, true).NVENCCUDA)
+		require.NoFileExists(t, count)
+	}
+}
+
+func TestTonemapProbeShared(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		s, count := tonemapStream(t, fail)
+		m := &Manager{
+			c: s.c, url: "http://localhost/other.mov", tc: s.m.tc,
+			probe: &ProbeVideoData{HDR: true, Rotation: -90, FrameRate: 60},
+		}
+		other := &Stream{c: s.c, m: m, quality: s.quality, width: s.width, height: s.height}
+
+		require.Equal(t, !fail, s.transcodeSpec(0, true).VAAPIOpenCL)
+		require.Equal(t, !fail, other.transcodeSpec(30, false).VAAPIOpenCL)
+		data, err := os.ReadFile(count)
+		require.NoError(t, err)
+		if fail {
+			require.Equal(t, "call\ncall\n", string(data), "failures are not shared")
+		} else {
+			require.Equal(t, "call\n", string(data))
+		}
 	}
 }

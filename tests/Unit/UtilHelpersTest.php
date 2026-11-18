@@ -39,4 +39,15 @@ final class UtilHelpersTest extends TestCase
         self::assertContains(Util::getArch(), ['amd64', 'aarch64']);
         self::assertContains(Util::getLibc(), ['glibc', 'musl']);
     }
+
+    public function testGetLibcParse(): void
+    {
+        self::assertSame('glibc', Util::getLibc('ldd (Debian GLIBC 2.36) 2.36', ''));
+        self::assertSame('glibc', Util::getLibc('ldd (GNU libc) 2.40', ''));
+        self::assertSame('musl', Util::getLibc('musl libc (x86_64)', ''));
+        self::assertSame('glibc', Util::getLibc('ldd (Gentoo 2.38) 2.38', 'glibc 2.38'));
+        self::assertSame('musl', Util::getLibc('musl libc (x86_64)', 'glibc 2.41'));
+        self::assertNull(Util::getLibc('ldd (Gentoo 2.38) 2.38', ''));
+        self::assertNull(Util::getLibc('muslim glibcx', 'notglibc'));
+    }
 }

@@ -6,7 +6,9 @@ import gallery.memories.data.local.media.MediaStoreDataSource
 import gallery.memories.data.remote.assets.AssetSyncCoordinator
 import gallery.memories.data.remote.http.AuthState
 import gallery.memories.server.controllers.BridgeController
+import gallery.memories.server.controllers.ViewImageController
 import gallery.memories.server.controllers.ProxyController
+import gallery.memories.ui.image.NativeHoleImage
 import gallery.memories.server.controllers.ShellController
 import gallery.memories.server.controllers.StaticController
 import gallery.memories.server.controllers.UpstreamNetworkException
@@ -23,6 +25,7 @@ import kotlinx.coroutines.withContext
 /**
  * Dispatches local-server requests to the bridge, static files, the
  * offline shell, or the upstream proxy. See [handle] for the order.
+ * Requests reach it already authorized by [LocalEngine].
  *
  * Paths are matched against the raw request target (as before), since routing
  * here is prefix-based and must not depend on percent-decoding.
@@ -31,14 +34,19 @@ class ServerRouter(
     private val appCtx: Context,
     private val auth: AuthState,
     private val assets: AssetSyncCoordinator,
-    private val guard: AuthGuard,
     private val bridge: BridgeController,
     private val proxy: ProxyController,
     private val dataSource: MediaStoreDataSource,
+    private val holeImage: NativeHoleImage,
     private val configProvider: () -> ServerConfig?,
 ) {
     companion object {
         private val TAG = ServerRouter::class.java.simpleName
+
+        /** Sec-Fetch-Dest values that execute what they load. */
+        private val SCRIPT_DESTS = setOf(
+            "script", "worker", "sharedworker", "serviceworker", "audioworklet", "paintworklet",
+        )
     }
 
     /**
@@ -48,15 +56,19 @@ class ServerRouter(
      */
     suspend fun handle(call: ApplicationCall) {
         val config = configProvider()
-        if (!guard.authorized(call)) {
-            KtorRespond.plain(call, HttpStatusCode.Forbidden, "forbidden")
-            return
-        }
         val method = call.request.httpMethod.value.uppercase()
         val rawPath = call.request.uri.substringBefore("?")
         try {
             if (VideoController.isVideo(rawPath)) {
                 VideoController.serveVideo(appCtx, call, dataSource)
+                return
+            }
+            if (ViewImageController.isViewImage(rawPath)) {
+                ViewImageController.serveImage(call, holeImage)
+                return
+            }
+            if (ViewImageController.isViewImageLocal(rawPath)) {
+                ViewImageController.serveLocalImage(call, holeImage)
                 return
             }
             if (BridgeController.isBridge(rawPath)) {
@@ -94,23 +106,29 @@ class ServerRouter(
             }
             val jsPrefix1 = config.webRoot + "/index.php/apps/memories/js/"
             val jsPrefix2 = config.webRoot + "/apps/memories/js/"
-            if (method == "GET" && (rawPath.startsWith(jsPrefix1) || rawPath.startsWith(jsPrefix2))) {
+            val jsPrefix3 = config.appsPath?.let { "$it/js/" }
+            val isJs = rawPath.startsWith(jsPrefix1) || rawPath.startsWith(jsPrefix2) ||
+                (jsPrefix3 != null && rawPath.startsWith(jsPrefix3))
+            if (method == "GET" && isJs) {
                 StaticController.serveFile(call, File(config.assetDir, "js"), "text/javascript; charset=utf-8")
                 return
             }
             val appPrefix = config.webRoot + "/index.php/apps/memories"
             val isEntry = rawPath == "/" || rawPath == config.webRoot || rawPath == config.webRoot + "/"
             val isAppRoute = rawPath == appPrefix || rawPath == "$appPrefix/" || rawPath.startsWith("$appPrefix/")
-            if (method == "GET" && (isEntry || isAppRoute) &&
-                (isEntry || call.request.headers["Accept"]?.contains("text/html") == true) &&
-                serveShell(config, call)
-            ) return
+            val isDocument = call.request.headers["Accept"]?.contains("text/html") == true ||
+                call.request.headers["Sec-Fetch-Dest"] == "document"
+            if (method == "GET" && (isEntry || isAppRoute) && isDocument && serveShell(config, call)) return
             // Only local code serves documents (shell/static above): never forward a
             // page navigation upstream, or remote content would render as a local page.
-            if (method == "GET" &&
-                (call.request.headers["Accept"]?.contains("text/html") == true ||
-                    call.request.headers["Sec-Fetch-Dest"] == "document")
-            ) {
+            // The entry is never an API: an XHR here (e.g. a followed redirect) must not get the shell.
+            if (method == "GET" && (isDocument || isEntry)) {
+                KtorRespond.plain(call, HttpStatusCode.NotFound, "not found")
+                return
+            }
+            // Scripts run with full nativex access, so they must come from the signed
+            // snapshot: 'self' in the CSP also covers everything proxied from the server.
+            if (call.request.headers["Sec-Fetch-Dest"] in SCRIPT_DESTS) {
                 KtorRespond.plain(call, HttpStatusCode.NotFound, "not found")
                 return
             }
@@ -139,6 +157,6 @@ class ServerRouter(
      */
     private suspend fun serveShell(config: ServerConfig, call: ApplicationCall): Boolean {
         val describe = withContext(Dispatchers.IO) { assets.readDescribe(config.assetDir) } ?: return false
-        return ShellController.serveShell(config, call, describe, auth.credentials()?.first)
+        return ShellController.serveShell(config, call, describe, auth.uid())
     }
 }

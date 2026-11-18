@@ -1,13 +1,13 @@
 import { emit, subscribe, unsubscribe } from '@nextcloud/event-bus';
 import { onBeforeUnmount, onMounted } from 'vue';
 import type { FragmentName, Fragment } from '@services/route-fragment';
-import type { IPhoto } from '@typings';
+import type { IPhoto, NativeXVideoState } from '@typings';
 
 export type BusEvent = {
   /** Open/close the navigation drawer */
   'toggle-navigation': { open: boolean };
   /** File was created */
-  'files:file:created': { fileid: number };
+  'files:file:created': { fileid: number; dayid?: number };
   /** File was updated */
   'files:file:updated': { fileid: number };
 
@@ -31,11 +31,14 @@ export type BusEvent = {
   'memories:timeline:soft-refresh': null;
   /** Hard-refresh the timeline */
   'memories:timeline:hard-refresh': null;
+  /** Timeline finished loading the day of a newly created file */
+  'memories:timeline:file-loaded': { fileid: number; dayid: number };
   /** Timeline recycler scrolling */
   'memories.recycler.scroll': {
     current: number;
     previous: number;
     dynTopMatterVisible: boolean;
+    scrollerInteracting: boolean;
   };
 
   /** Albums were updated for these photos */
@@ -43,6 +46,15 @@ export type BusEvent = {
 
   /** NativeX database was updated */
   'nativex:db:updated': null;
+
+  /** Native app resumed from background */
+  'nativex:resume': null;
+
+  /** Height of the native keyboard over the page in CSS px */
+  'nativex:keyboard:height': number;
+
+  /** Native hole video player snapshot */
+  'nativex:video:state': NativeXVideoState;
 } & {
   /** A fragment was removed from the route */
   [key in `memories:fragment:pop:${FragmentName}`]: Fragment;

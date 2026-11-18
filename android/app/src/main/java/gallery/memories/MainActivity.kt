@@ -1,20 +1,14 @@
 package gallery.memories
 
-import android.annotation.SuppressLint
-import android.net.Uri
-import android.os.Build.VERSION.SDK_INT
 import android.os.Bundle
 import android.util.Log
-import android.view.KeyEvent
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.window.OnBackInvokedDispatcher
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.media3.common.util.UnstableApi
 import gallery.memories.data.local.prefs.PreferencesStore
 import gallery.memories.databinding.ActivityMainBinding
-import gallery.memories.ui.player.VideoPlayerManager
 import gallery.memories.ui.startup.AppStartupCoordinator
 import gallery.memories.ui.theme.EdgeToEdgeController
 import gallery.memories.ui.theme.ThemeManager
@@ -26,7 +20,6 @@ import gallery.memories.ui.web.WebViewSetup
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-@UnstableApi
 /**
  * Single-activity host: owns the WebView and UI components, delegating
  * business logic to them. All [NativeX] bridge entry points funnel through here.
@@ -48,13 +41,27 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var themes: ThemeManager
     private lateinit var edges: EdgeToEdgeController
-    private lateinit var eventBus: JsEventBus
-    private lateinit var player: VideoPlayerManager
+    lateinit var eventBus: JsEventBus
+        private set
     private lateinit var chooser: FileChooserHandler
     private lateinit var startup: AppStartupCoordinator
 
-    /** One-shot: cleared by the web client after the main page loads so Back skips entry pages. */
-    var clearHistoryOnLoad = false
+    /** False until the local server is up and the first page load is scheduled; retried on resume. */
+    private var booted = false
+
+    /** One-shot URL prefix: history is cleared once a page under it commits, so Back skips entry pages. */
+    var clearHistoryOnLoad: String? = null
+
+    /**
+     * Enabled only while the page has history; otherwise the system default
+     * (background the task) applies. Uses the page's own history.back() since
+     * WebView's goBack() skips entries pushed without a user gesture.
+     */
+    private val backCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            binding.webview.evaluateJavascript("history.back()", null)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,18 +71,17 @@ class MainActivity : AppCompatActivity() {
         nativex = NativeX(this)
         themes = ThemeManager(this, nativex.container.prefs)
         edges = EdgeToEdgeController(this)
-        player = VideoPlayerManager(this, nativex.auth)
         chooser = FileChooserHandler(this).also { it.register() }
-        startup = AppStartupCoordinator(this, nativex.auth, nativex.assets, nativex.local) { msg, long ->
-            nativex.toast(msg, long)
-        }
+        startup = AppStartupCoordinator(
+            activity = this,
+            auth = nativex.auth,
+            assets = nativex.assets,
+            local = nativex.local,
+            toast = { msg, long -> nativex.toast(msg, long) },
+        )
 
         edges.setupInsets()
-        if (SDK_INT >= 36) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(
-                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-            ) { onGoBack() }
-        }
+        onBackPressedDispatcher.addCallback(this, backCallback)
         edges.applyOrientation(resources.configuration.orientation)
         restoreTheme()
 
@@ -101,26 +107,27 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         binding.webview.onPause()
         binding.webview.pauseTimers()
+        runCatching { nativex.container.holeVideo.pause() }
     }
 
     public override fun onResume() {
         super.onResume()
         binding.webview.onResume()
         binding.webview.resumeTimers()
+        binding.webview.invalidate()
         eventBus.onResumeRefresh()
+        eventBus.busEmit("nativex:resume")
+        runCatching { nativex.container.holeVideo.resume() }
+        if (booted) nativex.local.attach() else bootLocalServer()
     }
 
-    @SuppressLint("GestureBackNavigation")
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (SDK_INT < 36 && event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_BACK) {
-            onGoBack()
-            return true
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !isFinishing && !isDestroyed) {
+            binding.webview.onResume()
+            binding.webview.resumeTimers()
+            binding.webview.invalidate()
         }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    private fun onGoBack() {
-        if (binding.webview.canGoBack()) binding.webview.goBack() else finish()
     }
 
     private fun initializeWebView() {
@@ -129,6 +136,10 @@ class MainActivity : AppCompatActivity() {
         val userAgent = getString(R.string.ua_app_prefix) + BuildConfig.VERSION_NAME + " " + WebSettings.getDefaultUserAgent(this)
         WebViewSetup.setup(binding.webview, userAgent, nativex, BuildConfig.DEBUG)
         nativex.account.refreshCredentials()
+    }
+
+    /** Starts (or reattaches to) the process-wide local server, then loads the first page. */
+    private fun bootLocalServer() {
         try {
             nativex.local.ensureStarted()
         } catch (e: Exception) {
@@ -136,20 +147,32 @@ class MainActivity : AppCompatActivity() {
             nativex.toast("Local server failed to start", true)
             return
         }
+        booted = true
+        nativex.attachAsyncMessages()
         // Per-process secret as HttpOnly cookie: without it the local server rejects everything. Load only after it lands.
         CookieManager.getInstance().setCookie("http://127.0.0.1/", nativex.local.authCookie()) {
-            runOnUiThread { startup.onLocalCookieReady() }
+            runOnUiIfAlive { startup.onLocalCookieReady() }
         }
         CookieManager.getInstance().flush()
     }
 
-    /** Clears back history once after a main-page load; clearHistory() before loadUrl() alone does not. */
-    fun consumeClearHistoryFlag(view: WebView) {
-        if (clearHistoryOnLoad) {
-            clearHistoryOnLoad = false
+    /** Clears back history once the main page lands; clearHistory() before loadUrl() alone does not. */
+    fun consumeClearHistoryFlag(view: WebView, url: String?) {
+        val prefix = clearHistoryOnLoad ?: return
+        if (url?.startsWith(prefix) == true) {
+            clearHistoryOnLoad = null
             view.clearHistory()
         }
     }
+
+    fun syncBackCallback(view: WebView) {
+        backCallback.isEnabled = view.copyBackForwardList().currentIndex > 0
+    }
+
+    val isAlive: Boolean get() = !isFinishing && !isDestroyed
+
+    /** Like [runOnUiThread], but drops [block] once the activity is finishing or destroyed. */
+    fun runOnUiIfAlive(block: () -> Unit) = runOnUiThread { if (isAlive) block() }
 
     fun loadDefaultUrl(): Boolean = startup.loadDefaultUrl()
 
@@ -161,10 +184,6 @@ class MainActivity : AppCompatActivity() {
 
     /** URL of a static entry page (welcome/waiting) bundled in the APK. */
     fun localStaticUrl(name: String): String = startup.localStaticUrl(name)
-
-    fun initializePlayer(uris: Array<Uri>, uid: Long, loop: Boolean = false) = player.initializePlayer(uris, uid, loop)
-
-    fun destroyPlayer(uid: Long) = player.destroyPlayer(uid)
 
     fun storeTheme(color: String?, isDark: Boolean) = themes.storeTheme(color, isDark)
 

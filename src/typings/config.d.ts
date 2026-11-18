@@ -5,12 +5,14 @@ declare module '@typings' {
   export type IConfig = {
     // general stuff
     version: string;
+    base_url: string;
     vod_disable: boolean;
     video_default_quality: string;
     places_gis: number;
     places_search_url: string;
     map_tile_servers: IMapTileServer[];
     map_tile_server_url: string;
+    map_cluster_density: number;
     language: string;
     locale: string;
 
@@ -23,6 +25,7 @@ declare module '@typings' {
     facerecognition_enabled: boolean;
     lens_enabled: boolean;
     preview_generator_enabled: boolean;
+    vips_enabled: boolean;
 
     // general settings
     timeline_path: string;
@@ -61,6 +64,11 @@ declare module '@typings' {
     high_res_cond: HighResCond | null;
     show_face_rect: boolean;
     album_list_sort: number;
+    skip_viewer_delete_confirm: boolean;
+    video_volume: number;
+    video_muted: boolean;
+    video_speed: number;
+    native_hdr: boolean;
   };
 
   export type IMapTileServer = {

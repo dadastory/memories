@@ -1,9 +1,7 @@
 package gallery.memories.timeline
 
 import android.net.Uri
-import android.os.Build
 import android.util.Log
-import androidx.media3.common.util.UnstableApi
 import gallery.memories.data.local.db.PhotoDao
 import gallery.memories.data.local.media.MediaDeleter
 import gallery.memories.data.local.media.MediaObserver
@@ -16,7 +14,6 @@ import gallery.memories.data.local.prefs.PreferencesStore
 import org.json.JSONArray
 import org.json.JSONObject
 
-@UnstableApi
 /** Local-media timeline: Room index joined with MediaStore rows, shaped as server-API JSON. */
 class TimelineRepositoryImpl(
     private val dao: PhotoDao,
@@ -28,7 +25,6 @@ class TimelineRepositoryImpl(
     private val folders: FolderSettings,
     private val observer: MediaObserver,
     private val onDatabaseChanged: () -> Unit,
-    private val isAlive: () -> Boolean,
 ) : TimelineRepository {
     companion object {
         private val TAG = TimelineRepositoryImpl::class.java.simpleName
@@ -36,13 +32,24 @@ class TimelineRepositoryImpl(
 
     override val syncStatus: Int get() = syncManager.syncStatus
 
+    private var destroyed = false
+
     override fun initialize() {
         dao.ping()
-        if (syncManager.syncDeltaDb() + syncManager.pruneDeleted() > 0) onDatabaseChanged()
-        observer.register()
+        val changed = syncManager.syncDeltaDb() + syncManager.pruneDeleted() > 0
+        synchronized(this) {
+            if (destroyed) return
+            observer.register()
+        }
+        if (changed) onDatabaseChanged()
     }
 
-    override fun destroy() = observer.unregister()
+    override fun destroy() {
+        synchronized(this) {
+            destroyed = true
+            observer.unregister()
+        }
+    }
 
     override fun syncDeltaDb(): Int = syncManager.syncDeltaDb()
 
@@ -143,13 +150,13 @@ class TimelineRepositoryImpl(
 
     /**
      * Deletes device files. dry only counts; confirms reports whether the OS
-     * will ask the user (R+) versus deleting silently.
+     * will ask the user versus deleting silently (media management granted).
      */
     override fun delete(auids: List<String>, dry: Boolean): JSONObject {
         val response = JSONObject().put("message", "ok")
         val sysImgs = getSystemImagesByAUIDs(auids)
         response.put("count", sysImgs.size)
-        response.put("confirms", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+        response.put("confirms", !deleter.canManageMedia())
         if (dry || sysImgs.isEmpty()) return response
         deleter.deleteUris(sysImgs.map { it.uri })
         dao.deleteFileIds(sysImgs.map { it.fileId })

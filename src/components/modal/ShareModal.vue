@@ -165,7 +165,7 @@ async function shareLowRes() {
     photos.value!.map((photo) => ({
       auid: String(), // no local
       href: utils.isVideo(photo)
-        ? API.VIDEO_TRANSCODE(photo.fileid, '480p.mp4')
+        ? API.VIDEO_TRANSCODE(photo.fileid, '480p.mp4', [])
         : utils.getPreviewUrl({ photo, size: 2048 }),
     })),
   );
@@ -176,7 +176,7 @@ async function shareHighRes() {
     photos.value!.map((photo) => ({
       auid: String(), // no local
       href: utils.isVideo(photo)
-        ? API.VIDEO_TRANSCODE(photo.fileid, '1080p.mp4')
+        ? API.VIDEO_TRANSCODE(photo.fileid, '1080p.mp4', [])
         : API.IMAGE_DECODABLE(photo.fileid, photo.etag),
     })),
   );
@@ -233,7 +233,7 @@ async function shareLink() {
       // Create album using WebDAV
       try {
         signal.throwIfAborted();
-        await dav.createAlbum(name, { rethrow: true, signal });
+        await dav.createAlbum(name, { signal });
       } catch (e) {
         if (isAbortError(e)) return null;
         showError(t('memories', 'Failed to create album for public link'));

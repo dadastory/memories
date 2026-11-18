@@ -17,6 +17,7 @@ Memories is a *batteries-included* photo management solution for Nextcloud with 
 - **📱 Mobile Support**: Work from any device, of any shape and size through the web app.
 - **✏️ Edit Metadata**: Edit dates and other metadata on photos quickly and in bulk.
 - **📦 Archive**: Store photos you don't want to see in your timeline in a separate folder.
+- **📸 Advanced Formats**: Support for Ultra-HDR and RAW image formats.
 - **📹 Video Transcoding**: Transcode videos and use HLS for maximal performance.
 - **🗺️ Map**: View your photos on a map, tagged with accurate reverse geocoding.
 - **📦 Migration**: Migrate easily from Nextcloud Photos and Google Takeout.
@@ -29,7 +30,7 @@ Memories is a *batteries-included* photo management solution for Nextcloud with 
 1. Run `php occ memories:index` to generate metadata indices for existing photos.
 1. Open the 📷 Memories app in Nextcloud and set the directory containing your photos.
 ]]></description>
-    <version>10.2.0</version>
+    <version>11.1.4</version>
     <licence>agpl</licence>
     <author mail="radialapps@gmail.com">Varun Patil</author>
     <namespace>Memories</namespace>
@@ -41,7 +42,7 @@ Memories is a *batteries-included* photo management solution for Nextcloud with 
     <website>https://memories.gallery</website>
     <bugs>https://github.com/pulsejet/memories/issues</bugs>
     <repository>https://github.com/pulsejet/memories</repository>
-    <screenshot>https://raw.githubusercontent.com/pulsejet/memories/master/appinfo/screenshot.jpg</screenshot>
+    <screenshot>https://raw.githubusercontent.com/pulsejet/memories/master/appinfo/screenshot.png</screenshot>
     <donation>https://github.com/sponsors/pulsejet</donation>
     <dependencies>
         <php min-version="8.3"/>

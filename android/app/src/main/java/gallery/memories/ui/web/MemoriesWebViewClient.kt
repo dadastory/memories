@@ -7,17 +7,17 @@ import android.net.Uri
 import android.net.http.SslError
 import android.util.Log
 import android.webkit.SslErrorHandler
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
-import androidx.media3.common.util.UnstableApi
 import gallery.memories.MainActivity
 import androidx.core.net.toUri
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
-@UnstableApi
 /** Only loopback pages load inside; everything else goes to the browser or is blocked. */
 class MemoriesWebViewClient(private val activity: MainActivity) : WebViewClient() {
     companion object {
@@ -34,7 +34,10 @@ class MemoriesWebViewClient(private val activity: MainActivity) : WebViewClient(
     }
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-        if (!request.isForMainFrame) return false
+        if (!request.isForMainFrame) {
+            Log.w(TAG, "Blocked subframe navigation to ${request.url}")
+            return true
+        }
         return handleMainFrame(view, request.url)
     }
 
@@ -74,12 +77,29 @@ class MemoriesWebViewClient(private val activity: MainActivity) : WebViewClient(
 
     override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
-        activity.consumeClearHistoryFlag(view)
+        activity.consumeClearHistoryFlag(view, url)
+        activity.syncBackCallback(view)
+    }
+
+    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        if (!isReload) activity.consumeClearHistoryFlag(view, url)
+        activity.syncBackCallback(view)
+    }
+
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        Log.w(TAG, "Renderer gone (crashed=${detail.didCrash()}), reloading ${view.url}")
+        activity.clearHistoryOnLoad = null
+        if (!activity.isFinishing && !activity.isDestroyed) {
+            view.reload()
+        }
+        return true
     }
 
     /** Main-frame network failures otherwise render as a silent blank page. */
     override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
         if (request.isForMainFrame) {
+            activity.clearHistoryOnLoad = null
             Log.w(TAG, "Page failed: ${request.url} code=${error.errorCode} ${error.description}")
             Toast.makeText(view.context, "Failed to load page: ${error.description}", Toast.LENGTH_LONG).show()
         }
@@ -88,20 +108,23 @@ class MemoriesWebViewClient(private val activity: MainActivity) : WebViewClient(
     /** HTTP 4xx/5xx on the main frame otherwise renders as a blank page with no log. */
     override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
         if (request.isForMainFrame) {
+            activity.clearHistoryOnLoad = null
             Log.w(TAG, "Page HTTP error: ${request.url} code=${errorResponse.statusCode} ${errorResponse.reasonPhrase}")
             Toast.makeText(view.context, "Failed to load page: HTTP ${errorResponse.statusCode}", Toast.LENGTH_LONG).show()
         }
     }
 
     /**
-     * Proceeds on SSL errors only when the user explicitly trusts all
-     * certificates for this server; otherwise surfaces a toast.
+     * Proceeds on SSL errors only for the configured server when the user
+     * explicitly trusts all its certificates; otherwise surfaces a toast.
      */
     @SuppressLint("WebViewClientOnReceivedSslError")
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-        if (activity.nativex.auth.isTrustingAllCertificates) {
+        val auth = activity.nativex.auth
+        if (auth.isTrustingAllCertificates && auth.isServer(error?.url?.toHttpUrlOrNull())) {
             handler?.proceed()
         } else {
+            activity.clearHistoryOnLoad = null
             activity.nativex.toast("Failed to load due to SSL error: ${error?.primaryError}", true)
             super.onReceivedSslError(view, handler, error)
         }

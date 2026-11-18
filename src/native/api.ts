@@ -70,12 +70,35 @@ export const NAPI = {
   IMAGE_FULL: (auid: string) => `${BASE_URL}/image/full/${auid}`,
 
   /**
-   * Local video file API (range-aware, for <video> / vidstack).
+   * Local video file API (range-aware, for <video>).
    * @regex ^/video/full/\d+$
    * @param fileId MediaStore file ID of the local video
    * @returns {Blob} Original video bytes of the photo.
    */
   VIDEO_FULL: (fileId: number) => `${BASE_URL}/video/full/${fileId}`,
+
+  /**
+   * Put an image into the native image view below the WebView.
+   * POST raw image bytes (e.g. JPEG preview). Resolves only after
+   * the native image view has rendered the image.
+   * @regex ^/api/view/image$
+   * @param seq Monotonic upload counter for ordering (query)
+   * @param blob Image bytes
+   * @returns {void}
+   */
+  VIEW_IMAGE: (seq: number) => `${BASE_URL}/api/view/image?seq=${seq}`,
+
+  /**
+   * Put the on-device copy of an indexed photo into the native view.
+   * POST JSON {uri} with the MediaStore URI from the day response.
+   * Resolves only after the native view has rendered the image.
+   * Shares the upload sequence counter.
+   * @regex ^/api/view/image/local$
+   * @param seq Monotonic upload counter for ordering (query)
+   * @param uri MediaStore content URI of the photo
+   * @returns {void}
+   */
+  VIEW_IMAGE_LOCAL: (seq: number) => `${BASE_URL}/api/view/image/local?seq=${seq}`,
 
   /**
    * Upload a local file to Nextcloud natively, without routing
@@ -116,6 +139,13 @@ export const NAPI = {
   CONFIG_ALLOW_MEDIA: (val: boolean) => `${BASE_URL}/api/config/allow_media/${val ? '1' : '0'}`,
 
   /**
+   * Allow media management (opens system media-management-apps screen)
+   * @regex ^/api/config/allow_manage_media$
+   * @returns
+   */
+  CONFIG_ALLOW_MANAGE_MEDIA: () => `${BASE_URL}/api/config/allow_manage_media`,
+
+  /**
    * Offline asset download progress.
    * @regex ^/api/assets/progress$
    * @returns {status, done, total, error} of the web asset sync.
@@ -130,6 +160,15 @@ export type NativeX = {
    * @returns Should always return true.
    */
   isNative: () => boolean;
+
+  /** General setup after boot. */
+  bootstrap?: () => void;
+
+  /** Get the native platform. */
+  getPlatform?: () => 'android' | 'ios';
+
+  /** No-op on the sync bridge. */
+  setupEventBus?: () => void;
 
   /**
    * Set the theme color of the app.
@@ -147,7 +186,7 @@ export type NativeX = {
    * Vibrate for UI interaction.
    * @param duration Duration in milliseconds
    */
-  vibrate: (duration: number) => void;
+  vibrate?: (duration: number) => void;
 
   /**
    * Make a native toast to the user.
@@ -183,36 +222,6 @@ export type NativeX = {
   setShareBlobs: (objects: string) => void;
 
   /**
-   * This signature is kept for backward compatibility.
-   * Play a video from the given AUID or URL(s).
-   * @param auid AUID of file (will play local if available)
-   * @param fileid File ID of the video (only used for file tracking)
-   * @param urlArray JSON-encoded array of URLs to play
-   * @details The URL array may contain multiple URLs, e.g. direct playback
-   * and HLS separately. The native client must try to play the first URL.
-   */
-  playVideo: (auid: string, fileid: number, urlArray: string) => void;
-
-  /**
-   * Play a video from the given AUID or URL(s).
-   * @param auid AUID of file (will play local if available)
-   * @param fileid File ID of the video (only used for file tracking)
-   * @param urlArray JSON-encoded array of URLs to play
-   * @param loop Whether the video should loop
-   * @details The URL array may contain multiple URLs, e.g. direct playback
-   * and HLS separately. The native client must try to play the first URL.
-   */
-  playVideo2: (auid: string, fileid: number, urlArray: string, loop?: boolean) => void;
-
-  /**
-   * Destroy the video player.
-   * @param fileid File ID of the video
-   * @details The native client must destroy the video player and free up resources.
-   * If the fileid doesn't match the playing video, the call must be ignored.
-   */
-  destroyVideo: (fileid: number) => void;
-
-  /**
    * Set the local folders configuration to show in the timeline.
    * @param json JSON-encoded array of LocalFolderConfig
    */
@@ -224,14 +233,20 @@ export type NativeX = {
    */
   configGetLocalFolders: () => string;
 
-  /** Get the native platform. */
-  getPlatform?: () => 'android' | 'ios';
-
   /**
    * Check if the user has allowed media access.
    * @returns Whether the user has allowed media access.
    */
   configHasMediaPermission: () => boolean;
+
+  /**
+   * Check if silent local delete is allowed (no OS prompt).
+   * @returns Whether the app is a media management app.
+   */
+  canManageMedia?: () => boolean;
+
+  /** Playable video codecs for ExoPlayer as JSON array of ffprobe names. */
+  getPlayableVideoCodecs?: () => string;
 
   /**
    * Get the current sync status.
@@ -246,6 +261,52 @@ export type NativeX = {
    * @param value Value of remote
    */
   setHasRemote: (auids: string, buids: string, value: boolean) => void;
+
+  /**
+   * Control the native hole video player (play/pause/seek/volume/mute/rate).
+   * @param json JSON-encoded NativeVideoCommand
+   */
+  nativeVideoCommand: (json: string) => void;
+
+  /** Show/hide the native image below the WebView. */
+  showNativeImage?: (show: boolean) => void;
+
+  /** Show/hide the native video below the WebView. */
+  showNativeVideo?: (show: boolean) => void;
+
+  /**
+   * Toggle HDR color mode for the activity window.
+   * @param enabled True for HDR, false for default
+   */
+  setHdrColorMode?: (enabled: boolean) => void;
+
+  /**
+   * Move/resize the native dummy image to the hole rect.
+   * @param x Left in CSS px
+   * @param y Top in CSS px
+   * @param w Width in CSS px
+   * @param h Height in CSS px
+   */
+  setNativeImageRect?: (x: number, y: number, w: number, h: number) => void;
+
+  /**
+   * Animate the native dummy image to the hole rect.
+   * @param x Left in CSS px
+   * @param y Top in CSS px
+   * @param w Width in CSS px
+   * @param h Height in CSS px
+   * @param duration Duration in ms
+   */
+  setNativeImageRectTransition?: (x: number, y: number, w: number, h: number, duration: number) => void;
+
+  /**
+   * Move/resize the native hole video to the hole rect.
+   * @param x Left in CSS px
+   * @param y Top in CSS px
+   * @param w Width in CSS px
+   * @param h Height in CSS px
+   */
+  setNativeVideoRect?: (x: number, y: number, w: number, h: number) => void;
 };
 
 /** The native interface is a global object that is injected by the native app. */
@@ -256,4 +317,39 @@ export const nativex: NativeX = (<any>globalThis).nativex;
  */
 export function has() {
   return !!nativex;
+}
+
+/** NativeX asynchronous (fire-and-forget) API over WebMessage. */
+export type NativeXAsync = Pick<
+  NativeX,
+  | 'bootstrap'
+  | 'setupEventBus'
+  | 'setThemeColor'
+  | 'playTouchSound'
+  | 'vibrate'
+  | 'toast'
+  | 'setHasRemote'
+  | 'showNativeImage'
+  | 'setNativeImageRect'
+  | 'setNativeImageRectTransition'
+  | 'showNativeVideo'
+  | 'setNativeVideoRect'
+  | 'nativeVideoCommand'
+  | 'setHdrColorMode'
+>;
+
+/** Get a fire-and-forget caller for one async method. */
+export function nxAsync<M extends keyof NativeXAsync>(method: M): NativeXAsync[M] | null {
+  // Feature detection: all async methods exist on the sync handler.
+  if (!nativex?.[method]) return null;
+
+  // Return a function that posts a message to the native app.
+  return (...args: unknown[]) => {
+    // The async native interface for fire-and-forget interactions.
+    const nativexAsync = (<any>globalThis).nativex_async;
+    // Legacy compatibility when the async bridge is not found.
+    if (!nativexAsync) (nativex[method] as (...a: unknown[]) => void)(...args);
+    // Modern async bridge: post a message to the native app.
+    else nativexAsync.postMessage(JSON.stringify({ method, args }));
+  };
 }

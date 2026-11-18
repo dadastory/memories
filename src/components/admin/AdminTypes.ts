@@ -7,6 +7,7 @@ export type ISystemConfig = {
   'memories.index.mode': string;
   'memories.index.path': string;
   'memories.index.folder.blocklist': string[];
+  'memories.index.mime.blocklist': string[];
 
   'memories.gis_type': number;
   'memories.places.search.url': string;
@@ -33,12 +34,17 @@ export type ISystemConfig = {
   'memories.vod.nvenc': boolean;
   'memories.vod.nvenc.temporal_aq': boolean;
   'memories.vod.nvenc.scale': string;
+  'memories.vod.nvenc.tonemap_cuda': boolean;
 
   'memories.vod.use_transpose': boolean;
   'memories.vod.use_transpose.force_sw': boolean;
   'memories.vod.use_gop_size': boolean;
 
   'memories.db.triggers.fcu': boolean;
+
+  'memories.vips.path': string;
+  'memories.vips.enabled': boolean;
+  'memories.vips.raw.enabled': boolean;
 
   enabledPreviewProviders: string[];
   preview_max_x: number;
@@ -54,6 +60,7 @@ export type IServiceStatus = {
   healthy: boolean;
   detail: string;
   latencyMs?: number | null;
+  pingMs?: number | null;
 };
 
 export type ISystemStatus = {
@@ -74,6 +81,7 @@ export type ISystemStatus = {
   failure_count: number;
   mimes: string[];
   imagick: string | false;
+  vips: IBinaryStatus;
   gis_type: number;
   gis_count?: number;
   exiftool: IBinaryStatus;

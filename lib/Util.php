@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace OCA\Memories;
 
+use OCA\Memories\AppInfo\Application;
+use OCA\Memories\Settings\SystemConfig;
+use OCP\App\IAppManager;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\DataResponse;
 use OCP\Files\Folder;
@@ -25,6 +28,8 @@ final class Util extends StaticUtil
         private IDBConnection $connection,
         private IURLGenerator $urlGenerator,
         private IRequest $request,
+        private IAppManager $appManager,
+        private SystemConfig $systemConfig,
     ) {}
 
     /**
@@ -71,7 +76,6 @@ final class Util extends StaticUtil
                     ($this->closure)($output);
                 } catch (\OCA\Memories\HttpResponseException $e) {
                     $res = $e->response;
-                    $output->setHttpResponseCode($res->getStatus());
                     $output->setHeader($this->getStatusHeader($res->getStatus()));
                     if ($res instanceof Http\DataResponse) {
                         $output->setHeader('Content-Type: application/json');
@@ -80,7 +84,6 @@ final class Util extends StaticUtil
                         $output->setOutput($res->render());
                     }
                 } catch (\Exception $e) {
-                    $output->setHttpResponseCode(Http::STATUS_INTERNAL_SERVER_ERROR);
                     $output->setHeader($this->getStatusHeader(Http::STATUS_INTERNAL_SERVER_ERROR));
                     $output->setHeader('Content-Type: application/json');
                     $output->setOutput(json_encode([
@@ -140,6 +143,45 @@ final class Util extends StaticUtil
     public function getUserFolder(?string $uid = null): Folder
     {
         return $this->rootFolder->getUserFolder($uid ?? $this->getUID());
+    }
+
+    /**
+     * Get the absolute URL of the main page with a trailing slash.
+     */
+    public function getBaseUrl(): string
+    {
+        return rtrim($this->urlGenerator->linkToRouteAbsolute('memories.Page.main'), '/').'/';
+    }
+
+    /**
+     * Get the installed version of the Memories app.
+     */
+    public function getMemoriesVersion(): string
+    {
+        return $this->appManager->getAppVersion(Application::APPNAME);
+    }
+
+    /**
+     * Get the version of the JS build.
+     * In debug mode, this is the manifest build time.
+     */
+    public function getManifestVersion(): string
+    {
+        if (!$this->systemConfig->get('debug')) {
+            return $this->getMemoriesVersion();
+        }
+
+        $manifest = @file_get_contents(__DIR__.'/../js/memories-manifest.json');
+        if (false === $manifest) {
+            return self::MANIFEST_VERSION_UNKNOWN;
+        }
+
+        $decoded = json_decode($manifest, true);
+        if (!\is_array($decoded) || !isset($decoded['version'])) {
+            return self::MANIFEST_VERSION_UNKNOWN;
+        }
+
+        return (string) $decoded['version'];
     }
 
     /**

@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -19,8 +20,9 @@ import { ManifestPlugin, ManifestSignPlugin } from './webpack.manifest-sign-plug
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MiB = 1024 * 1024;
-const appName = process.env.npm_package_name!;
-const appVersion = process.env.npm_package_version!;
+const { name: appName, version: appVersion } = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'),
+);
 const buildMode = process.env.NODE_ENV;
 const isDev = buildMode === 'development';
 console.info('Building', appName, appVersion, '\n');
@@ -32,7 +34,15 @@ export default {
   target: 'web',
   mode: buildMode,
   devtool: 'source-map',
-  cache: isDev,
+  cache: isDev
+    ? {
+        type: 'filesystem',
+        maxAge: 2 * 24 * 60 * 60 * 1000,
+        buildDependencies: {
+          config: fs.globSync(path.resolve(__dirname, 'webpack*.ts')),
+        },
+      }
+    : false,
 
   context: path.resolve(__dirname, 'src'),
 
@@ -74,7 +84,7 @@ export default {
   },
 
   watchOptions: {
-    ignored: /node_modules/,
+    ignored: /node_modules|\/js\//,
     aggregateTimeout: 300,
   },
 
@@ -98,31 +108,8 @@ export default {
     minimize: !isDev,
     minimizer: [
       new TerserPlugin({
-        exclude: [/filerobot-image-editor/],
         terserOptions: {
           ecma: 2022,
-          output: {
-            comments: false,
-          },
-        },
-        extractComments: true,
-      }),
-
-      // We depend on some internal state of filerobot.
-      new TerserPlugin({
-        include: [/filerobot-image-editor/],
-        terserOptions: {
-          ecma: 2022,
-          compress: {
-            keep_fnames: true,
-            keep_classnames: true,
-            evaluate: false,
-            reduce_vars: false,
-          },
-          mangle: {
-            keep_fnames: true,
-            keep_classnames: true,
-          },
           output: {
             comments: false,
           },
@@ -168,15 +155,11 @@ export default {
       },
       {
         test: /\.tsx?$/,
-        use: [
-          {
-            loader: 'ts-loader',
-            options: {
-              appendTsSuffixTo: [/\.vue$/],
-              transpileOnly: true,
-            },
-          },
-        ],
+        loader: 'esbuild-loader',
+        options: {
+          loader: 'ts',
+          target: 'es2022',
+        },
         exclude: /node_modules/,
       },
       {
@@ -213,6 +196,7 @@ export default {
       swSrc: path.resolve(path.join('src', 'service-worker.ts')),
       swDest: 'memories-service-worker.js',
       maximumFileSizeToCacheInBytes: (isDev ? 50 : 20) * MiB,
+      exclude: [/\.map$/],
     }),
 
     // Make appName & appVersion available as a constant

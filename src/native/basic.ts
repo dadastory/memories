@@ -1,6 +1,7 @@
 import axios from '@nextcloud/axios';
 import { generateUrl } from '@nextcloud/router';
-import { has, nativex } from './api';
+import { has, nativex, nxAsync } from './api';
+import { initEventBus } from './event-bus';
 import { initShellSync } from './shell';
 import { getBuilder as storageBuilder } from '@nextcloud/browser-storage';
 
@@ -17,8 +18,14 @@ export async function initialize() {
   // https://github.com/nextcloud/server/blob/8af5e06b6239102cb6905ed5717a62565b3bdfcc/core/src/utils/RedirectUnsupportedBrowsers.js#L9
   coreStore.setItem('unsupported-browser-ignore', 'true');
 
-  // Replicate the server template
+  // General bootstrapping / resets.
+  nxAsync('bootstrap')?.();
+
+  // Replicate the server template.
   initShellSync();
+
+  // Register for native-to-web events.
+  initEventBus();
 
   // System theme changes need a native bar update (CSS follows on its own).
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTheme());
@@ -56,14 +63,15 @@ export async function setTheme(color?: string, dark?: boolean) {
       hasAttr('data-theme-dark') ||
       hasAttr('data-theme-dark-highcontrast');
   }
-  nativex?.setThemeColor?.(color, dark);
+
+  nxAsync('setThemeColor')?.(color, dark);
 }
 
 /**
  * Play touch sound.
  */
 export async function playTouchSound() {
-  nativex?.playTouchSound?.();
+  nxAsync('playTouchSound')?.();
 }
 
 /**
@@ -71,7 +79,7 @@ export async function playTouchSound() {
  */
 export function vibrate(duration: number) {
   if (nativex?.vibrate) {
-    nativex.vibrate(duration);
+    nxAsync('vibrate')?.(duration);
   } else {
     navigator.vibrate?.(duration);
   }
@@ -100,7 +108,7 @@ export async function logout() {
  * Add current origin to URL if doesn't have any protocol or origin.
  */
 export function addOrigin(url: string) {
-  return url.match(/^(https?:)?\/\//)
+  return url.match(/^((https?:)?\/\/|content:\/\/)/)
     ? url
     : url.startsWith('/')
       ? `${location.origin}${url}`

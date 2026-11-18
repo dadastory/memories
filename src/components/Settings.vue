@@ -133,6 +133,14 @@
         {{ t('memories', 'Show metadata in slideshow') }}
       </NcCheckboxRadioSwitch>
 
+      <NcCheckboxRadioSwitch
+        :model-value="config.skip_viewer_delete_confirm"
+        @update:model-value="updateSkipViewerDeleteConfirm"
+        type="switch"
+      >
+        {{ t('memories', 'Skip delete confirmation in viewer') }}
+      </NcCheckboxRadioSwitch>
+
       <NcTextField
         :label="t('memories', 'Slideshow Duration (1-60 seconds)')"
         :label-visible="true"
@@ -171,6 +179,15 @@
           >{{ t('memories', 'Never load high resolution image') }}
         </NcCheckboxRadioSwitch>
       </div>
+
+      <NcCheckboxRadioSwitch
+        v-if="isNative"
+        :model-value="config.native_hdr"
+        @update:model-value="updateNativeHdr"
+        type="switch"
+      >
+        {{ t('memories', 'Enable HDR display') }}
+      </NcCheckboxRadioSwitch>
     </NcAppSettingsSection>
 
     <NcAppSettingsSection id="account-settings" :name="names.account" v-if="isNative">
@@ -184,9 +201,10 @@
 
     <NcAppSettingsSection id="device-settings" :name="t('memories', 'Device Folders')" v-if="isNative">
       <div class="radio-group">
-        {{ t('memories', 'Local folders to include in the timeline view') }}
+        {{ t('memories', 'Local folders to include in the timeline view.') }}
+        {{ t('memories', 'Run initial device setup to see all folders.') }}
         <NcCheckboxRadioSwitch
-          v-for="folder in localFolders"
+          v-for="folder in topLocalFolders"
           :key="folder.id"
           v-model="folder.enabled"
           @update:model-value="updateDeviceFolders"
@@ -246,7 +264,16 @@
     </NcAppSettingsSection>
 
     <NcAppSettingsSection id="map-settings" :name="names.map" v-if="tileServers.length > 0">
+      <NcCheckboxRadioSwitch
+        :model-value="config.map_cluster_density > 1"
+        @update:model-value="updateMapHighPrecision"
+        type="switch"
+      >
+        {{ t('memories', 'Enable high precision markers') }}
+      </NcCheckboxRadioSwitch>
+
       <div class="radio-group">
+        {{ t('memories', 'Map tile server') }}
         <NcCheckboxRadioSwitch
           v-for="tile in tileServers"
           :key="tile.name"
@@ -325,6 +352,11 @@ const emit = defineEmits<{
 const router = useRouter();
 
 const localFolders = ref<nativex.LocalFolderConfig[]>([]);
+const topLocalFolders = computed(() => {
+  // Older native apps don't report counts or sort by them
+  if (localFolders.value.some((f) => f.count === undefined)) return localFolders.value;
+  return localFolders.value.filter((f) => f.count! > 10).slice(0, 10);
+});
 const names = {
   header: t('memories', 'Settings'),
   general: t('memories', 'General'),
@@ -333,7 +365,7 @@ const names = {
   account: t('memories', 'Account'),
   folders: t('memories', 'Folders'),
   albums: t('memories', 'Albums'),
-  map: t('memories', 'Map Tiles'),
+  map: t('memories', 'Map View'),
 };
 
 const timelinePaths = computed((): string[] => {
@@ -477,6 +509,14 @@ async function updateMetadataInSlideshow(val: boolean) {
   await setConfig('metadata_in_slideshow', val);
 }
 
+async function updateNativeHdr(val: boolean) {
+  await setConfig('native_hdr', val);
+}
+
+async function updateSkipViewerDeleteConfirm(val: boolean) {
+  await setConfig('skip_viewer_delete_confirm', val);
+}
+
 async function updateSlideshowDuration(val: string | number) {
   const n = typeof val === 'number' ? val : parseFloat(val);
   if (!Number.isFinite(n)) return;
@@ -517,6 +557,10 @@ async function updateSortAlbumMonth(val: boolean) {
 // Map settings
 async function updateMapTileServer(val: string) {
   await setConfig('map_tile_server_url', val);
+}
+
+async function updateMapHighPrecision(val: boolean) {
+  await setConfig('map_cluster_density', val ? 4 : 1);
 }
 
 // --------------- Native APIs start -----------------------------

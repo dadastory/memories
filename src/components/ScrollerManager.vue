@@ -54,7 +54,7 @@ import { ref, computed, shallowRef, nextTick, useTemplateRef, toRaw, watch } fro
 import { useThrottleFn } from '@vueuse/core';
 
 import { vFastText } from '@directives/vFastText';
-import { windowDims } from '@services/viewport';
+import { pointerType } from '@services/viewport';
 import { RenewingTimeout } from '@services/utils/renewing-timeout';
 import * as utils from '@services/utils/common';
 import * as lens from '@services/lens';
@@ -85,7 +85,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   interactend: [];
-  scroll: [event: { current: number; previous: number }];
+  scroll: [event: utils.BusEvent['memories.recycler.scroll']];
 }>();
 
 const scroller = useTemplateRef<HTMLDivElement>('scroller');
@@ -127,16 +127,16 @@ let adjustRequest = false;
 /** Scroller is being moved with interaction */
 const interacting = ref(false);
 /** Last known scroll position of the recycler */
-const lastKnownRecyclerScroll = ref(0);
+let lastRecyclerLogicalScroll = 0;
 /** Last requested y position when interacting */
-const lastRequestedRecyclerY = ref(NaN);
+let lastRequestedRecyclerY = NaN;
 
 /** Height of usable area */
 const height = computed(() => props.recyclerState.scrollerHeight - topPadding.value);
 
 /** Position of hover cursor */
 const hoverCursorTransform = computed(() => {
-  const mob = windowDims.isMobile;
+  const mob = pointerType.isCoarse;
   const min = topPadding.value + (mob ? 2 : 0); // padding for curvature
   const max = props.recyclerState.scrollerHeight - (mob ? 6 : 0); // padding for shadow
   const val = hoverCursorY.value;
@@ -154,8 +154,8 @@ function reset() {
   reflowRequest = false;
   adjustRequest = false;
   interacting.value = false;
-  lastKnownRecyclerScroll.value = 0;
-  lastRequestedRecyclerY.value = NaN;
+  lastRecyclerLogicalScroll = 0;
+  lastRequestedRecyclerY = NaN;
 
   // Clear all timers
   scrollingTimer.clear();
@@ -189,16 +189,18 @@ function recyclerScrolled(event: Event | null) {
 function updateFromRecyclerScroll() {
   // Get the scroll position
   const scroll = props.recyclerState.scrollTop;
+  const logicalScroll = scroll - props.recyclerState.startOffset;
 
   // Emit scroll event
   const event = {
-    current: scroll,
-    previous: lastKnownRecyclerScroll.value,
-    dynTopMatterVisible: scroll < props.beforeHeight,
+    current: logicalScroll,
+    previous: lastRecyclerLogicalScroll,
+    dynTopMatterVisible: logicalScroll < props.beforeHeight,
+    scrollerInteracting: interacting.value,
   };
+  lastRecyclerLogicalScroll = logicalScroll;
   utils.bus.emit('memories.recycler.scroll', event);
   emit('scroll', event);
-  lastKnownRecyclerScroll.value = scroll;
 
   // Ignore if dragging the scroller
   if (interacting.value) return;
@@ -213,7 +215,7 @@ function updateFromRecyclerScroll() {
 
   // Move hover cursor to same position unless hovering
   // Regardless, we need this call because the internal mapping might have changed
-  if (!windowDims.isMobile && scroller.value?.matches(':hover')) {
+  if (!pointerType.isCoarse && scroller.value?.matches(':hover')) {
     moveHoverCursor(hoverCursorY.value);
   } else {
     moveHoverCursor(rtop);
@@ -273,36 +275,54 @@ function recreate() {
   lastAdjustHeight.value = 0;
 
   // Ticks
-  let prevYear = 9999;
-  let prevMonth = 0;
-
-  // Get a new tick
-  const getTick = (dayId: number, isMonth = false, text?: string | number): ITick => ({
-    dayId,
-    isMonth,
-    text,
-    y: 0,
-    count: 0,
-    topF: 0,
-    top: 0,
-    s: false,
-  });
+  let prevYear = Number.MAX_SAFE_INTEGER;
+  let prevMonth = Number.MAX_SAFE_INTEGER;
+  let prevDayId = Number.MAX_SAFE_INTEGER;
 
   // Iterate over rows
   for (const row of toRaw(props.rows)) {
     if (row.type === 0) {
-      // Make date string
-      const dateTaken = utils.dayIdToDate(row.dayId);
-
       // Create tick
+      const tick: ITick = {
+        dayId: row.dayId,
+        isMonth: false,
+        text: undefined,
+        y: 0,
+        count: 0,
+        topF: 0,
+        top: 0,
+        s: false,
+      };
+
+      // Check if this should be shown.
+      const dateTaken = utils.dayIdToDate(row.dayId);
       const dtYear = dateTaken.getUTCFullYear();
       const dtMonth = dateTaken.getUTCMonth();
-      const isMonth = dtMonth !== prevMonth || dtYear !== prevYear;
-      const text = dtYear === prevYear ? undefined : dtYear;
-      ticks.push(getTick(row.dayId, isMonth, text));
+      const dtDayId = row.dayId;
 
-      prevMonth = dtMonth;
+      // Mark a tick visible whenever the month or year changes.
+      if (dtMonth !== prevMonth || dtYear !== prevYear) {
+        tick.isMonth = true;
+      }
+
+      // Show the year when it changes. In DESC sort, we assign the year
+      // from the previous tick here, so it shows at the lower boundary of
+      // the previous year. This means that the tick text is deliberately
+      // mismatched with the year / row that it actually matches.
+      if (dtYear !== prevYear) {
+        const textDayId = dtDayId > prevDayId ? dtDayId : prevDayId;
+        const textYear = dtDayId > prevDayId ? dtYear : prevYear;
+
+        // Never set the year for special fake days with meaningless dayIds.
+        if (textDayId !== Number.MAX_SAFE_INTEGER && textDayId !== lens.TOP_RESULTS_DAYID) {
+          tick.text = textYear;
+        }
+      }
+
+      ticks.push(tick);
       prevYear = dtYear;
+      prevMonth = dtMonth;
+      prevDayId = dtDayId;
     }
   }
 }
@@ -373,7 +393,7 @@ function computeVisibleTicks() {
   // This is not as bad as it looks, it's actually 12*O(n)
   // because there are only 12 months in a year
   const fontSizePx = parseFloat(getComputedStyle(cursorSt.value!).fontSize);
-  const minGap = fontSizePx + (windowDims.isMobile ? 5 : 2);
+  const minGap = fontSizePx + (pointerType.isCoarse ? 5 : 2);
   let prevShow = -9999;
   for (const [idx, tick] of ticks.entries()) {
     // Conservative
@@ -440,7 +460,7 @@ function updateVisibleTicks() {
 function setTicksTop(total: number) {
   // On mobile, move the ticks up by half the height of the cursor
   // so that the cursor is centered on the tick instead (on desktop, it's at the bottom)
-  const displayPadding = windowDims.isMobile ? -MOBILE_CURSOR_HH : 0;
+  const displayPadding = pointerType.isCoarse ? -MOBILE_CURSOR_HH : 0;
 
   // Set topF (float) and top (rounded) values
   for (const tick of ticks) {
@@ -554,8 +574,8 @@ function moveto(y: number, snap: boolean) {
   const ry = y1 + (y2 - y1) * (yfrac || 0);
   const targetY = snap ? y1 + SNAP_OFFSET : ry;
 
-  if (lastRequestedRecyclerY.value !== targetY) {
-    lastRequestedRecyclerY.value = targetY;
+  if (lastRequestedRecyclerY !== targetY) {
+    lastRequestedRecyclerY = targetY;
     props.recycler?.scrollToPosition(targetY);
     if (snap) vibrateTick();
   }
@@ -606,7 +626,7 @@ function handleScroll() {
 
 /** Tiny haptic tick while dragging the handle on mobile */
 const vibrateTick = useThrottleFn(() => {
-  if (windowDims.isMobile) nativex.vibrate(VIBRATE_MS);
+  if (pointerType.isCoarse) nativex.vibrate(VIBRATE_MS);
 }, VIBRATE_THROTTLE_MS);
 
 defineExpose({
@@ -620,12 +640,6 @@ defineExpose({
 </script>
 
 <style lang="scss" scoped>
-@mixin phone {
-  @media (max-width: 768px) {
-    @content;
-  }
-}
-
 .scroller {
   contain: layout style;
   overflow-y: clip;
@@ -650,7 +664,7 @@ defineExpose({
   }
 
   // On phone, there is no point of hover, so just hide it when not scrolling
-  @include phone {
+  @media (pointer: coarse) {
     visibility: hidden;
   }
 
@@ -677,12 +691,12 @@ defineExpose({
       background-color: var(--color-main-text);
       opacity: 0.15;
       display: block;
-      @include phone {
+      @media (pointer: coarse) {
         display: none;
       }
     }
 
-    @include phone {
+    @media (pointer: coarse) {
       background-color: var(--color-main-background);
       padding: 5px;
       border-radius: 4px;
@@ -742,7 +756,7 @@ defineExpose({
   }
 
   // Hide ticks on mobile unless hovering
-  @include phone {
+  @media (pointer: coarse) {
     // Shift pointer events to hover cursor
     pointer-events: none;
     .cursor.hv {

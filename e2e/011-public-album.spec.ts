@@ -1,5 +1,5 @@
-import { test, expect } from '@playwright/test';
-import { appUrl, e2eHeaders, psub, username } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, psub, username, buildUrl, openViewer } from './navigation';
 import { DavClient, withPublicAPI, withPublicPage } from './utils';
 
 import type { APIRequestContext, APIResponse } from '@playwright/test';
@@ -133,7 +133,7 @@ test.describe('Public album share', () => {
     await withPublicAPI(async (request) => {
       const albums = new AlbumShareAPI(request);
       const res = await albums.days('invalid-token');
-      expect(res.ok()).toBe(false);
+      expect(res.status()).toBe(404);
     });
   });
 
@@ -144,7 +144,10 @@ test.describe('Public album share', () => {
       expect(res.ok()).toBeTruthy();
 
       const body = await res.body();
-      expect(body.length).toBeGreaterThan(0);
+      expect(body.subarray(0, 2).toString()).toBe('PK');
+      for (const file of albumFiles) {
+        expect(body.includes(file)).toBe(true);
+      }
     });
   });
 
@@ -154,7 +157,7 @@ test.describe('Public album share', () => {
 
       await expect(page).toHaveURL(`${appUrl}/a/${albumToken}`);
       await expect(page.locator('.dtm-container .header')).toHaveText(albumName);
-      await expect(page.locator('.p-outer')).toHaveCount(albumFiles.length);
+      await expect(page.locator('.p-outer:visible')).toHaveCount(albumFiles.length);
       for (const fileid of albumFileids) {
         await expect(page.locator(`.p-outer--${fileid}`)).toBeVisible();
       }
@@ -166,8 +169,7 @@ test.describe('Public album share', () => {
       await page.goto(`${appUrl}/a/${albumToken}`);
       await expect(page.locator(`.p-outer--${albumFileids[0]}`)).toBeVisible();
 
-      await page.locator(`.p-outer--${albumFileids[0]} > .img-outer`).click();
-      await page.waitForSelector('.memories-viewer.fully-opened');
+      await openViewer(page, albumFileids[0]);
     });
   });
 });
@@ -211,45 +213,25 @@ class AlbumShareAPI {
   }
 
   async days(token: string): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/api/days`);
-    url.searchParams.set('nopreload', '1');
-    url.searchParams.set('token', token);
-    url.searchParams.set('albums', token);
-    return this.request.get(url.toString());
+    const url = buildUrl('/api/days', { nopreload: '1', token: token, albums: token });
+    return this.request.get(url);
   }
 
   async day(token: string, dayid: number): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/api/days/${dayid}`);
-    url.searchParams.set('token', token);
-    url.searchParams.set('albums', token);
-    return this.request.get(url.toString());
+    const url = buildUrl(`/api/days/${dayid}`, { token: token, albums: token });
+    return this.request.get(url);
   }
 
   async imageInfo(token: string, fileid: number, albums: string | null = token): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/api/image/info/${fileid}`);
-    url.searchParams.set('token', token);
-    if (albums) {
-      url.searchParams.set('albums', albums);
-    }
-    return this.request.get(url.toString());
+    return this.request.get(buildUrl(`/api/image/info/${fileid}`, { token, albums }));
   }
 
   async preview(token: string | null, fileid: number, albums: string | null = token): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/api/image/preview/${fileid}`);
-    if (token) {
-      url.searchParams.set('token', token);
-    }
-    if (albums) {
-      url.searchParams.set('albums', albums);
-    }
-    url.searchParams.set('x', '64');
-    url.searchParams.set('y', '64');
-    return this.request.get(url.toString());
+    return this.request.get(buildUrl(`/api/image/preview/${fileid}`, { token, albums, x: 64, y: 64 }));
   }
 
   async download(token: string): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/a/${token}/download`);
-    url.searchParams.set('albums', '1');
-    return this.request.get(url.toString());
+    const url = buildUrl(`/a/${token}/download`, { albums: '1' });
+    return this.request.get(url);
   }
 }

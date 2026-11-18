@@ -21,7 +21,8 @@ final class IndexQuery
     /**
      * Stream candidate fileids under the given top folder ids in batches.
      *
-     * Crawls hidden folders; blocklisted folders prune whole subtrees.
+     * Crawls hidden folders; blocklisted folders prune whole subtrees
+     * and blocklisted file names are skipped.
      * Only unindexed files with supported mimetypes and nonzero size qualify.
      *
      * @param int[] $topFolderIds top folder fileids
@@ -30,7 +31,7 @@ final class IndexQuery
      */
     public function getCandidateBatches(
         array $topFolderIds,
-        int $batchSize = 200,
+        int $batchSize = 5000,
     ): \Generator {
         $mimes = $this->mime->getMimeList();
         if ([] === $topFolderIds || [] === $mimes) {
@@ -95,12 +96,12 @@ final class IndexQuery
             ->from('cte_file_parents', 'c')
             ->where(SQL::exists($query, $hasFile('.nomedia')))
             ->orWhere(SQL::exists($query, $hasFile('.nomemories')))
-            ->orWhere($query->createFunction($this->tq->folderBlocklistedClause(\count($blocklist), 'c')))
+            ->orWhere($query->createFunction($this->tq->blocklistClause(\count($blocklist), 'c')))
             ->setMaxResults(1)
         ;
 
         CTEParams::setFileId($query, $fileId);
-        CTEParams::setFolderNameBlocklist($query, $blocklist);
+        CTEParams::setBlocklist($query, $blocklist);
 
         return false === $this->tq->executeQueryWithCTEs($query)->fetchOne();
     }
@@ -110,7 +111,7 @@ final class IndexQuery
      *
      * @param int[]    $topFolderIds top folder fileids
      * @param string[] $mimes        supported mimetypes
-     * @param string[] $blocklist    folder name LIKE patterns to prune
+     * @param string[] $blocklist    file or folder name LIKE patterns to skip/prune
      *
      * @return int[] fileids in no particular order
      */
@@ -146,13 +147,17 @@ final class IndexQuery
         // Filter out files that are already indexed or failed
         $this->filterNonIndexed($query);
 
+        // Blocklisted file names; last so already indexed rows skip the LIKEs
+        $blocklisted = $this->tq->blocklistClause(\count($blocklist), 'f');
+        $query->andWhere($query->createFunction("NOT ({$blocklisted})"));
+
         // Unordered fetch: indexed rows drop out via NOT EXISTS,
         // so refetching makes progress until an empty batch
         $query->setMaxResults($batchSize);
 
         CTEParams::setTopFolderIds($query, $topFolderIds);
         CTEParams::setIncludeHidden($query, true);
-        CTEParams::setFolderNameBlocklist($query, $blocklist);
+        CTEParams::setBlocklist($query, $blocklist);
 
         $batch = [];
         foreach ($this->tq->executeQueryWithCTEs($query)->fetchFirstColumn() as $fileid) {

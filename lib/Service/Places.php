@@ -7,6 +7,7 @@ namespace OCA\Memories\Service;
 use OCA\Memories\Db\SQL;
 use OCA\Memories\Db\TimelineWrite;
 use OCA\Memories\Settings\SystemConfig;
+use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IConfig;
 use OCP\IDBConnection;
 
@@ -50,7 +51,7 @@ final class Places
         if (IDBConnection::PLATFORM_MYSQL === $provider
         || IDBConnection::PLATFORM_MARIADB === $provider) {
             try {
-                $res = $this->connection->executeQuery("SELECT ST_GeomFromText('POINT(1 1)', 4326)")->fetchAssociative();
+                $res = $this->connection->executeQuery("SELECT ST_GeomFromText('POINT(1 1)', 0)")->fetchAssociative();
                 if (0 === \count($res)) {
                     throw new \Exception('Invalid result');
                 }
@@ -101,7 +102,7 @@ final class Places
         // Construct WHERE clause depending on GIS type
         $where = null;
         if (GIS_TYPE_MYSQL === $gisType) {
-            $where = "ST_Contains(geometry, ST_GeomFromText('POINT({$lat} {$lon})', 4326))";
+            $where = "ST_Contains(geometry, ST_GeomFromText('POINT({$lat} {$lon})', 0))";
         } elseif (GIS_TYPE_POSTGRES === $gisType) {
             // Postgres does not support using an index with POINT <@ POLYGON
             // https://www.postgresql.org/docs/current/gist-builtin-opclasses.html
@@ -192,22 +193,44 @@ final class Places
         }
 
         $fp = fopen($zipFile, 'w+');
+        if (false === $fp) {
+            throw new \Exception("Failed to open planet zip file for writing: {$zipFile}");
+        }
 
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_FILE, $fp);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_FAILONERROR, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 3600);
-        curl_exec($ch);
+        $result = curl_exec($ch);
+        $curlErrno = curl_errno($ch);
+        $curlError = curl_error($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         curl_close($ch);
 
         fclose($fp);
 
-        $this->logToStdout('Verifying planet data checksum...');
-        if ($checksum !== hash_file('sha256', $zipFile)) {
+        if (false === $result || 0 !== $curlErrno) {
             @unlink($zipFile);
 
-            throw new \Exception('Failed to verify checksum for planet data file');
+            throw new \Exception(
+                "Failed to download planet data file (HTTP {$httpCode}, "
+                ."curl error {$curlErrno}: {$curlError})",
+            );
+        }
+
+        $this->logToStdout('Verifying planet data checksum...');
+        $actualChecksum = hash_file('sha256', $zipFile);
+        if ($checksum !== $actualChecksum) {
+            $actualSize = filesize($zipFile);
+            @unlink($zipFile);
+
+            throw new \Exception(
+                "Failed to verify checksum for planet data file (expected {$checksum}, got {$actualChecksum}, "
+                ."HTTP {$httpCode}, size {$actualSize} bytes). "
+                .'The download may be incomplete or blocked, e.g. by a proxy, firewall, or full disk.',
+            );
         }
         $this->logToStdout('Planet data checksum verified successfully');
 
@@ -290,7 +313,7 @@ final class Places
             if (GIS_TYPE_MYSQL === $gis) {
                 $pdo = SQL::getMysqlPdo($this->connection, $this->config);
                 SQL::mysqlCopyFromFile($pdo, $prefix.'memories_planet', $planetFile, 'osm_id, admin_level, name, other_names');
-                SQL::mysqlCopyFromFile($pdo, 'memories_planet_geometry', $geomFile, 'id, poly_id, type_id, osm_id, @geom', 'geometry = ST_GeomFromText(@geom, 4326)');
+                SQL::mysqlCopyFromFile($pdo, 'memories_planet_geometry', $geomFile, 'id, poly_id, type_id, osm_id, @geom', 'geometry = ST_GeomFromText(@geom, 0)');
             } elseif (GIS_TYPE_POSTGRES === $gis) {
                 $pdo = SQL::getPgsqlPdo($this->connection, $this->config);
                 SQL::pgsqlCopyFromFile($pdo, $prefix.'memories_planet', $planetFile, 'osm_id, admin_level, name, other_names');
@@ -334,7 +357,13 @@ final class Places
             if (0 === $count % 500) {
                 $this->logToStdout("Updated places data for {$count} files");
             }
+        }, static function (IQueryBuilder $query): void {
+            $query->andWhere($query->expr()->isNotNull('lat'))
+                ->andWhere($query->expr()->isNotNull('lon'))
+            ;
         });
+
+        $this->logToStdout("Updated places data for {$count} files");
     }
 
     /**
@@ -349,9 +378,9 @@ final class Places
             // Detect database type to select the right syntax and geometry types.
             $platform = $this->connection->getDatabaseProvider(true);
 
-            // MySQL requires an SRID definition
+            // MySQL requires an SRID definition to use the spatial index
             // https://github.com/pulsejet/memories/issues/1067
-            $srid = IDBConnection::PLATFORM_MYSQL === $platform ? 'SRID 4326' : '';
+            $srid = IDBConnection::PLATFORM_MYSQL === $platform ? 'SRID 0' : '';
 
             // Create table
             $sql = "CREATE TABLE memories_planet_geometry (

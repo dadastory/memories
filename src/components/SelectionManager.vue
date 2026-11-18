@@ -2,7 +2,13 @@
   <Teleport to="body" :disabled="!windowDims.isMobile">
     <div v-if="show" class="memories-top-bar top-bar">
       <NcActions :inline="1">
-        <NcActionButton :aria-label="t('memories', 'Cancel')" @click="clear()">
+        <NcActionButton
+          :aria-label="t('memories', 'Cancel')"
+          @click="
+            nativex.playTouchSound();
+            clear();
+          "
+        >
           {{ t('memories', 'Cancel') }}
           <template #icon> <CloseIcon :size="20" /> </template>
         </NcActionButton>
@@ -464,7 +470,7 @@ function touchendPhoto(photo: IPhoto, event: TouchEvent) {
   if (photo.flag & constants.FLAG_PLACEHOLDER) return;
   delete touchAnchorRow?.virtualSticky;
 
-  if (touchTimer && !touchMoved) {
+  if (touchTimer && !touchMoved && event.type !== 'touchcancel') {
     // Register a single tap, only if the touch hadn't moved at all
     clickPhoto(photo, null, touchAnchorRowIdx.value);
   }
@@ -611,8 +617,9 @@ function touchMoveSelect(touch: Touch, rowIdx: number) {
   );
 
   // Which photo is the cursor over, if any
-  const elem: any = document
-    .elementsFromPoint(touch.clientX, clampedY)
+  const elementRoot = props.recycler?.getRootNode() as DocumentOrShadowRoot | undefined;
+  const elem: any = elementRoot
+    ?.elementsFromPoint(touch.clientX, clampedY)
     .find((e) => e.classList.contains('p-outer-super'));
   let overPhoto: IPhoto | null = elem?.__photo;
   if ((overPhoto?.flag ?? 0) & constants.FLAG_PLACEHOLDER) overPhoto = null;
@@ -1126,7 +1133,7 @@ defineExpose({
   opacity: 0.97;
   display: flex;
   vertical-align: middle;
-  z-index: 300; // above top-matter and scroller
+  z-index: var(--m-z-index-top-bar); // above content and nc-header
   box-sizing: border-box;
 
   > .text {

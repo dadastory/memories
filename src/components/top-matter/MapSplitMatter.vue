@@ -24,7 +24,7 @@
               :src="clusterPreviewUrl(cluster)"
               :class="{
                 'memories-thumb-important': true,
-                [`memories-thumb-${cluster.preview.key}`]: lastClick === cluster.preview.fileid,
+                [`memories-thumb-${cluster.preview!.key}`]: lastClick === cluster.preview?.fileid,
               }"
             />
           </div>
@@ -44,7 +44,9 @@ import axios from '@nextcloud/axios';
 
 import { API } from '@services/API';
 import * as utils from '@services/utils/common';
+import { isAbortError, useAbort } from '@services/utils/abort-vue';
 import { RenewingTimeout } from '@services/utils/renewing-timeout';
+import { config } from '@services/user-config';
 
 import MapStandalone from '@components/MapStandalone.vue';
 import XImg from '@components/frame/XImg.vue';
@@ -69,6 +71,7 @@ const oldZoom = ref(2);
 const clusters = ref<IMapCluster[]>([]);
 const animMarkers = ref(false);
 const lastClick = ref(0); // fileid
+const abort = useAbort();
 
 useResizeObserver(matter, handleContainerResize);
 
@@ -84,6 +87,11 @@ watch(
     if (curr[0] === old[0] && curr[1] === old[1]) return;
     initialize(true);
   },
+);
+
+watch(
+  () => config.map_cluster_density,
+  () => fetchClusters(),
 );
 
 function onMapReady() {
@@ -173,10 +181,9 @@ async function refresh() {
 }
 
 async function fetchClusters() {
+  const signal = abort.renew();
   const oldZoomVal = oldZoom.value;
-  const qbounds = route.query.b;
   const zoomParam = route.query.z?.toString();
-  const paramsChanged = () => route.query.b !== qbounds || route.query.z !== zoomParam;
 
   let { minLat, maxLat, minLon, maxLon } = boundsFromQuery();
 
@@ -191,26 +198,30 @@ async function fetchClusters() {
   // Get bounds with expanded margins
   const bounds = boundsToStr({ minLat, maxLat, minLon, maxLon });
 
-  // Make API call
+  // Make API call; abort previous in-flight request on pan/zoom
   const url = API.Q(API.MAP_CLUSTERS(), { bounds, zoom: zoomParam });
 
-  // Params have changed, quit
-  const res = await axios.get<IMapCluster[]>(url);
-  if (paramsChanged()) return;
+  try {
+    const res = await axios.get<IMapCluster[]>(url, { signal });
+    signal.throwIfAborted();
 
-  // Mark currently loaded zoom level
-  oldZoom.value = zoom.value;
+    // Mark currently loaded zoom level
+    oldZoom.value = zoom.value;
 
-  if (zoom.value > oldZoomVal) {
-    setClustersZoomIn(res.data, oldZoomVal);
-  } else if (zoom.value < oldZoomVal) {
-    setClustersZoomOut(res.data);
-  } else {
-    clusters.value = res.data;
+    if (zoom.value > oldZoomVal) {
+      setClustersZoomIn(res.data, oldZoomVal);
+    } else if (zoom.value < oldZoomVal) {
+      setClustersZoomOut(res.data);
+    } else {
+      clusters.value = res.data;
+    }
+
+    // Animate markers
+    animateMarkers();
+  } catch (e) {
+    if (isAbortError(e)) return;
+    throw e;
   }
-
-  // Animate markers
-  animateMarkers();
 }
 
 function boundsFromQuery() {
@@ -248,6 +259,7 @@ function setBoundsFromQuery() {
 }
 
 function clusterPreviewUrl(cluster: IMapCluster) {
+  if (!cluster.preview) return String();
   return utils.getPreviewUrl({
     photo: cluster.preview,
     msize: 256,
@@ -280,7 +292,7 @@ function zoomTo(cluster: IMapCluster) {
 
 function getGridKey(center: [number, number], zoomVal: number) {
   // Calcluate grid length
-  const clusterDensity = 1;
+  const clusterDensity = config.map_cluster_density;
   const oldGridLen = 180.0 / (2 ** zoomVal * clusterDensity);
 
   // Get map key

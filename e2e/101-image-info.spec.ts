@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { imageSize } from 'image-size';
-import { appUrl, e2eHeaders, psub, username } from './navigation';
+import { test, appUrl, e2eHeaders, psub, username, buildUrl } from './navigation';
 import { DavClient } from './utils';
 import { goldImageInfo } from './dataset-measurements';
 
@@ -33,7 +33,7 @@ test.describe('@api Image Info', () => {
     expect(data.mtime).toBeGreaterThan(0);
     data.mtime = 0;
 
-    // These depend on reverse geocoding, not setup yet.
+    // Fields that depend on the places database or aren't in the golden data.
     delete data.address;
     delete data.address_short;
     delete data.exif?.DateTimeEpoch;
@@ -48,14 +48,15 @@ test.describe('@api Image Info', () => {
     const dav = new DavClient(request);
     const fileid = await dav.fileid('/for-default/Nested 1/test_01.jpg');
 
-    const url = new URL(`${appUrl}/api/image/info/${fileid}`);
-    url.searchParams.set('current', '1');
-    const res = await request.get(url.toString());
+    const url = buildUrl(`/api/image/info/${fileid}`, { current: '1' });
+    const res = await request.get(url);
     expect(res.ok()).toBeTruthy();
 
     const data: IImageInfo & { current?: Record<string, unknown> } = await res.json();
+    const gold = goldImageInfo('primary/for-default/Nested 1/test_01.jpg');
     expect(data.fileid).toBe(fileid);
-    expect(data.current).toBeDefined();
+    expect(data.current?.ImageWidth).toBe(gold.w);
+    expect(data.current?.DateTimeOriginal).toBe(gold.exif?.DateTimeOriginal);
   });
 
   test('Info with clusters', async ({ request }) => {
@@ -63,14 +64,26 @@ test.describe('@api Image Info', () => {
     const fileid = await dav.fileid('/for-default/Nested 1/test_01.jpg');
 
     // Only albums supports file filtering (tags/places throw); mirrors sidebar usage.
-    const url = new URL(`${appUrl}/api/image/info/${fileid}`);
-    url.searchParams.set('clusters', 'albums');
-    const res = await request.get(url.toString());
-    expect(res.ok()).toBeTruthy();
+    const url = buildUrl(`/api/image/info/${fileid}`, { clusters: 'albums' });
 
-    const data: IImageInfo & { clusters?: Record<string, unknown[]> } = await res.json();
-    expect(data.clusters).toBeDefined();
-    expect(Array.isArray(data.clusters!.albums)).toBeTruthy();
+    const albumName = psub('E2E Info Album %wid');
+    const albumPath = `photos/${username}/albums/${albumName}`;
+    const albumNames = async () => {
+      const res = await request.get(url);
+      expect(res.ok()).toBeTruthy();
+      const data: IImageInfo = await res.json();
+      return data.clusters!.albums!.map((a) => a.name);
+    };
+
+    await dav.del(albumPath, true);
+    await dav.mkcol(albumPath);
+    try {
+      expect(await albumNames()).not.toContain(albumName);
+      await dav.copy(`files/${username}/for-default/Nested 1/test_01.jpg`, `${albumPath}/test_01.jpg`);
+      expect(await albumNames()).toContain(albumName);
+    } finally {
+      await dav.del(albumPath, true);
+    }
   });
 });
 
@@ -109,7 +122,7 @@ test.describe('@api Image delete via API', () => {
     expect((await delRes.json()).deleted).toBe(true);
 
     const infoRes = await request.get(`${appUrl}/api/image/info/${fileid}`);
-    expect(infoRes.ok()).toBeFalsy();
+    expect(infoRes.status()).toBe(404);
   });
 });
 
@@ -133,17 +146,15 @@ test.describe('@api Image edit copy', () => {
   test('Edit to a copy creates new file', async ({ request }) => {
     const dav = new DavClient(request);
     const fileid = await dav.fileid(src);
-    const info: IImageInfo = await dav.imageInfo(fileid);
     const copyName = psub('for-api-edit-copy-%wid.jpg');
 
     const res = await request.put(`${appUrl}/api/image/edit/${fileid}`, {
       data: {
         name: copyName,
-        width: info.w,
-        height: info.h,
-        quality: 0.9,
         extension: 'jpg',
-        state: [],
+        edits: [],
+        quality: 90,
+        copy: true,
       },
     });
     expect(res.ok()).toBeTruthy();

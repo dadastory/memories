@@ -4,14 +4,10 @@ import { cpus } from 'os';
 
 const config: PlaywrightTestConfig = {
   testDir: './e2e',
-  timeout: 600 * 1000,
+  timeout: 120 * 1000,
   expect: {
     timeout: 10000,
-    toHaveScreenshot: {
-      maxDiffPixelRatio: 1.0,
-    },
   },
-  snapshotPathTemplate: '{testDir}/screenshots/{testFilePath}/{arg}{ext}',
   fullyParallel: true,
   workers: Math.max(2, Math.min(16, Math.floor(cpus().length / 2))),
   forbidOnly: !!process.env.CI,
@@ -23,13 +19,16 @@ const config: PlaywrightTestConfig = {
   ],
   use: {
     actionTimeout: 30000,
-    trace: 'on-first-retry',
+    trace: 'retain-on-failure',
     screenshot: 'on',
     video: {
       mode: process.env.E2E_VIDEO === '1' ? 'on' : 'off',
       size: { width: 1280, height: 720 },
     },
     viewport: { width: 1280, height: 720 },
+    timezoneId: 'America/Los_Angeles',
+    // Local instances may redirect to https behind a self-signed forwarder
+    ignoreHTTPSErrors: true,
   },
   projects: [
     {

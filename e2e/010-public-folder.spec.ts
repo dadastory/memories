@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { fileURLToPath } from 'node:url';
-import { test, expect } from '@playwright/test';
-import { appUrl, baseUrl, e2eHeaders, psub } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, baseUrl, e2eHeaders, psub, buildUrl, openViewer } from './navigation';
 import { DavClient, withPublicAPI, withPublicPage } from './utils';
 
 import type { APIRequestContext, APIResponse } from '@playwright/test';
@@ -85,9 +85,8 @@ test.describe('Public folder share', () => {
 
   test('@api Public folder day photos', async () => {
     await withPublicAPI(async (request) => {
-      const url = new URL(`${appUrl}/api/days/${folderDayId}`);
-      url.searchParams.set('token', folderToken);
-      const res = await request.get(url.toString());
+      const url = buildUrl(`/api/days/${folderDayId}`, { token: folderToken });
+      const res = await request.get(url);
       expect(res.ok()).toBeTruthy();
 
       const data: IPhoto[] = await res.json();
@@ -99,9 +98,8 @@ test.describe('Public folder share', () => {
   test('@api Public folder image info and access control', async () => {
     await withPublicAPI(async (request) => {
       await test.step('Image in share loads with token', async () => {
-        const url = new URL(`${appUrl}/api/image/info/${folderFileids[0]}`);
-        url.searchParams.set('token', folderToken);
-        const res = await request.get(url.toString());
+        const url = buildUrl(`/api/image/info/${folderFileids[0]}`, { token: folderToken });
+        const res = await request.get(url);
         expect(res.ok()).toBeTruthy();
 
         const data = await res.json();
@@ -116,9 +114,8 @@ test.describe('Public folder share', () => {
       });
 
       await test.step('Image outside share is not found', async () => {
-        const url = new URL(`${appUrl}/api/image/info/${outsideFileid}`);
-        url.searchParams.set('token', folderToken);
-        const res = await request.get(url.toString());
+        const url = buildUrl(`/api/image/info/${outsideFileid}`, { token: folderToken });
+        const res = await request.get(url);
         expect(res.ok()).toBe(false);
         expect(res.status()).toBe(404);
       });
@@ -128,11 +125,8 @@ test.describe('Public folder share', () => {
   test('@api Public folder preview and access control', async () => {
     await withPublicAPI(async (request) => {
       await test.step('Preview in share loads with token', async () => {
-        const url = new URL(`${appUrl}/api/image/preview/${folderFileids[0]}`);
-        url.searchParams.set('token', folderToken);
-        url.searchParams.set('x', '64');
-        url.searchParams.set('y', '64');
-        const res = await request.get(url.toString());
+        const url = buildUrl(`/api/image/preview/${folderFileids[0]}`, { token: folderToken, x: '64', y: '64' });
+        const res = await request.get(url);
         expect(res.ok()).toBeTruthy();
         expect(res.headers()['content-type']).toContain('image/');
 
@@ -141,10 +135,8 @@ test.describe('Public folder share', () => {
       });
 
       await test.step('Preview without token is not found', async () => {
-        const url = new URL(`${appUrl}/api/image/preview/${folderFileids[0]}`);
-        url.searchParams.set('x', '64');
-        url.searchParams.set('y', '64');
-        const res = await request.get(url.toString());
+        const url = buildUrl(`/api/image/preview/${folderFileids[0]}`, { x: '64', y: '64' });
+        const res = await request.get(url);
         expect(res.ok()).toBe(false);
         expect(res.status()).toBe(404);
       });
@@ -164,7 +156,7 @@ test.describe('Public folder share', () => {
       await page.goto(`${appUrl}/s/${folderToken}`);
 
       await expect(page.locator('.top-matter')).toContainText(folderName);
-      await expect(page.locator('.p-outer')).toHaveCount(folderFiles.length);
+      await expect(page.locator('.p-outer:visible')).toHaveCount(folderFiles.length);
       for (const fileid of folderFileids) {
         await expect(page.locator(`.p-outer--${fileid}`)).toBeVisible();
       }
@@ -176,8 +168,7 @@ test.describe('Public folder share', () => {
       await page.goto(`${appUrl}/s/${folderToken}`);
       await expect(page.locator(`.p-outer--${folderFileids[0]}`)).toBeVisible();
 
-      await page.locator(`.p-outer--${folderFileids[0]} > .img-outer`).click();
-      await page.waitForSelector('.memories-viewer.fully-opened');
+      await openViewer(page, folderFileids[0]);
     });
   });
 
@@ -281,8 +272,10 @@ test.describe('Password protected folder share', () => {
       await page.getByRole('textbox', { name: 'Password' }).fill('definitely-wrong');
       await page.getByRole('button', { name: 'Submit' }).click();
 
+      // The form is visible before the POST returns; only the error proves the rejection.
+      await expect(page.getByText(/password is wrong/i)).toBeVisible();
       await expect(page.getByRole('textbox', { name: 'Password' })).toBeVisible();
-      await expect(page.locator('.p-outer')).toHaveCount(0);
+      await expect(page.locator('.p-outer:visible')).toHaveCount(0);
     });
   });
 });
@@ -325,6 +318,10 @@ test.describe('Public folder upload', () => {
     ];
 
     await withPublicPage(browser, async (page) => {
+      const chunkRequest = page.waitForRequest(
+        (r) => r.method() === 'PUT' && r.url().includes(`/public.php/dav/uploads/${folderToken}/`),
+      );
+
       await test.step('Select files', async () => {
         await page.goto(`${appUrl}/s/${folderToken}`);
         await expect(page.getByRole('button', { name: 'Upload files' })).toBeVisible();
@@ -336,7 +333,7 @@ test.describe('Public folder upload', () => {
         });
         expect(typeof maxChunkSize).toBe('number');
         await page.evaluate(() => {
-          window.OC.appConfig.files.max_chunk_size = 1024 * 1024;
+          window.OC.appConfig.files.max_chunk_size = 5 * 1024 * 1024; // library minimum
         });
 
         const fileChooserPromise = page.waitForEvent('filechooser');
@@ -348,6 +345,7 @@ test.describe('Public folder upload', () => {
       await test.step('Verify upload', async () => {
         // Video uses chunked upload (see #1634); toast confirms both files landed.
         await expect(page.getByText('Successfully uploaded 2 files', { exact: true })).toBeVisible({ timeout: 120000 });
+        await chunkRequest;
 
         const imageId = await dav.fileid(`${folderDir}/apple_h264_boy_01.jpg`);
         const videoId = await dav.fileid(`${folderDir}/samsung_s21_03.mp4`);
@@ -371,9 +369,8 @@ class FolderShareAPI {
   }
 
   async list(path: string): Promise<IShare[]> {
-    const url = new URL(`${appUrl}/api/share/links`);
-    url.searchParams.set('path', path);
-    const res = await this.request.get(url.toString());
+    const url = buildUrl('/api/share/links', { path: path });
+    const res = await this.request.get(url);
     expect(res.ok()).toBeTruthy();
     return res.json();
   }
@@ -406,9 +403,7 @@ class FolderShareAPI {
   }
 
   async days(token: string): Promise<APIResponse> {
-    const url = new URL(`${appUrl}/api/days`);
-    url.searchParams.set('nopreload', '1');
-    url.searchParams.set('token', token);
-    return this.request.get(url.toString());
+    const url = buildUrl('/api/days', { nopreload: '1', token: token });
+    return this.request.get(url);
   }
 }

@@ -23,20 +23,24 @@ declare(strict_types=1);
 
 namespace OCA\Memories\AppInfo;
 
+use OCA\Memories\Listeners\AddMissingIndicesListener;
 use OCA\Memories\Listeners\BeforeTemplateListener;
 use OCA\Memories\Listeners\PostDeleteListener;
 use OCA\Memories\Listeners\PostLogoutListener;
 use OCA\Memories\Listeners\PostWriteListener;
+use OCA\Memories\Preview\Vips;
 use OCA\Memories\Util;
 use OCP\AppFramework\App;
 use OCP\AppFramework\Bootstrap\IBootContext;
 use OCP\AppFramework\Bootstrap\IBootstrap;
 use OCP\AppFramework\Bootstrap\IRegistrationContext;
 use OCP\AppFramework\Http\Events\BeforeTemplateRenderedEvent;
+use OCP\DB\Events\AddMissingIndicesEvent;
 use OCP\Files\Events\Node\NodeCopiedEvent;
 use OCP\Files\Events\Node\NodeDeletedEvent;
 use OCP\Files\Events\Node\NodeTouchedEvent;
 use OCP\Files\Events\Node\NodeWrittenEvent;
+use OCP\Files\IMimeTypeDetector;
 use OCP\User\Events\UserLoggedOutEvent;
 
 const AUTH_HEADER = 'HTTP_AUTHORIZATION';
@@ -91,10 +95,43 @@ final class Application extends App implements IBootstrap
         // Register other global hooks
         $context->registerEventListener(BeforeTemplateRenderedEvent::class, BeforeTemplateListener::class);
         $context->registerEventListener(UserLoggedOutEvent::class, PostLogoutListener::class);
+        $context->registerEventListener(AddMissingIndicesEvent::class, AddMissingIndicesListener::class);
 
         // Extra hooks for native extension calls
         if (Util::callerIsNative()) {
             $this->handleNativeHeaders();
+        }
+
+        // Register VIPS if available.
+        $config = \OCP\Server::get(\OCP\IConfig::class);
+        if ($config->getSystemValueBool('memories.vips.enabled', true)
+            && !empty($config->getSystemValueString('memories.vips.path'))) {
+            // Check if RAW is enabled for VIPS.
+            $rawEnabled = $config->getSystemValueBool('memories.vips.raw.enabled', true);
+
+            // Register additional MIME types supported by VIPS.
+            $detector = \OCP\Server::get(IMimeTypeDetector::class);
+            if ($detector instanceof \OC\Files\Type\Detection) {
+                $detector->getAllMappings(); // is really needed
+                $mappings = [
+                    'avif' => ['image/avif'],
+                ];
+                if ($rawEnabled) {
+                    $rawExts = [
+                        '3fr', 'arw', 'cr2', 'cr3', 'crw', 'dng', 'erf',
+                        'fff', 'iiq', 'kdc', 'mdc', 'mos', 'mrw', 'nef',
+                        'nrw', 'orf', 'ori', 'pef', 'raf', 'raw',
+                        'rw2', 'rwl', 'sr2', 'srf', 'srw',
+                    ];
+                    foreach ($rawExts as $ext) {
+                        $mappings[$ext] = ['image/x-dcraw'];
+                    }
+                }
+                $detector->registerTypeArray($mappings);
+            }
+
+            // Register VIPS preview provider.
+            $context->registerPreviewProvider(Vips::class, Vips::mimeRegex($rawEnabled));
         }
     }
 

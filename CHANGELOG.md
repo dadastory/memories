@@ -2,6 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v11.1.4] - 2026-11-12
+
+- **Feature**: Option to run bundled VIPS in place for SELinux (`memories.vips.direct`) ([#1824](https://github.com/pulsejet/memories/issues/1824))
+- **Fix**: Video quality selector on Safari ([#1826](https://github.com/pulsejet/memories/issues/1826))
+- **Fix**: Sideways portrait videos with transpose enabled.
+- **Fix**: Direct streaming for rotated videos.
+- **Fix**: Auto video quality starts on the direct stream when available.
+- **Fix**: Exiftool timeouts and detection on some glibc systems ([#1814](https://github.com/pulsejet/memories/issues/1814))
+
+## [v11.1.2] - 2026-11-09
+
+- **Feature**: TLS client certificate (mTLS) support on Android ([#1169](https://github.com/pulsejet/memories/issues/1169))
+- **Feature**: Option to disable HDR display on Android ([#1796](https://github.com/pulsejet/memories/issues/1796))
+- **Fix**: Black or white screen on startup on Android ([#1796](https://github.com/pulsejet/memories/issues/1796))
+- **Fix**: System back button exiting the app on Android ([#1797](https://github.com/pulsejet/memories/issues/1797))
+- **Fix**: Name blocklist now applies to files as well as folders ([#1800](https://github.com/pulsejet/memories/issues/1800))
+- **Fix**: Failures with `open_basedir` restrictions ([#1806](https://github.com/pulsejet/memories/issues/1806))
+- Performance improvements for timeline, indexing, albums, tags and places.
+
+## [v11.0.2] - 2026-11-04
+
+- **Feature**: 2x faster reverse geocoding on MySQL.
+  - **Update**: MySQL setups must run `occ memories:places-setup --force` after update.
+- **Feature**: Bundled VIPS image decoder with Ultra-HDR, Samsung HDR and ICC profile support ([#1110](https://github.com/pulsejet/memories/issues/1110), [#1645](https://github.com/pulsejet/memories/issues/1645)).
+  - VIPS provider is enabled by default, and takes priority over Imagick/Imaginary.
+  - To update previews of existing photos, you can use "Refresh Metadata" after selecting photos from the UI.
+- **Feature**: Support for AVIF format via VIPS ([#1714](https://github.com/pulsejet/memories/issues/1714)).
+  - Existing AVIF and RAW files may need `occ maintenance:mimetype:update-db --repair-filecache` followed by `occ memories:index`.
+- **Feature**: Support for camera RAW formats via VIPS.
+  - RAW support is enabled by default.
+- **Feature**: Fully redesigned image editor backed by VIPS.
+  - VIPS is *required* for image editing support.
+- **Feature**: Image straightener in photo editor ([#1629](https://github.com/pulsejet/memories/issues/1629), [#1075](https://github.com/pulsejet/memories/issues/1075))
+- **Feature**: Support editing metadata of RAW files including stacked JPEG+RAW pairs ([#1222](https://github.com/pulsejet/memories/issues/1222)).
+- **Feature**: Direct streaming for HEVC / AV1 / VP9 videos with HLS-fMP4.
+- **Feature**: 25x faster storyboard rendering for video timeline previews.
+- **Feature**: 2x faster video start and seek with persistent file reads for the transcoder ([config options](https://memories.gallery/system-config/)).
+- **Feature**: High precision map markers setting ([#1701](https://github.com/pulsejet/memories/issues/1701))
+- **Feature**: Media management grant for silent local file operations on Android ([#1033](https://github.com/pulsejet/memories/pull/1033))
+- **Feature**: Option to skip delete confirmation in viewer ([#1687](https://github.com/pulsejet/memories/issues/1687), [#1689](https://github.com/pulsejet/memories/issues/1689), [#1246](https://github.com/pulsejet/memories/issues/1246))
+- **Feature**: GPU HDR tone mapping for NVENC with Jellyfin FFmpeg ([#1656](https://github.com/pulsejet/memories/issues/1656), [#1767](https://github.com/pulsejet/memories/pull/1767))
+- **Feature**: Directly scroll to a date in timeline by adding `#day/yyyy-mm-dd` to the URL.
+- **Feature**: Option to exclude MIME types from indexing (`memories.index.mime.blocklist`).
+- **Fix**: Green tint on full-size software-transcoded videos with older FFmpeg ([#1672](https://github.com/pulsejet/memories/issues/1672)).
+
 ## [v10.2.0] - 2026-10-23
 
 - **Feature**: Trash view to restore or permanently delete photos ([#208](https://github.com/pulsejet/memories/issues/208))

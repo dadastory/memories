@@ -25,9 +25,11 @@ namespace OCA\Memories\Controller;
 
 use OCA\Memories\AppInfo\Application;
 use OCA\Memories\Exceptions;
+use OCA\Memories\Preview\Vips;
 use OCA\Memories\Service\Lens;
 use OCA\Memories\Settings\SystemConfig;
 use OCA\Memories\Util;
+use OCP\App\AppPathNotFoundException;
 use OCP\App\IAppManager;
 use OCP\AppFramework\ApiController;
 use OCP\AppFramework\Http;
@@ -54,6 +56,7 @@ final class OtherController extends ApiController
         protected IConfig $config,
         protected SystemConfig $systemConfig,
         protected Lens $lens,
+        protected Vips $vips,
         protected Util $util,
     ) {
         parent::__construct(Application::APPNAME, $request);
@@ -88,7 +91,7 @@ final class OtherController extends ApiController
     {
         return $this->util->guardEx(function () {
             // get memories version
-            $version = $this->appManager->getAppVersion('memories');
+            $version = $this->util->getMemoriesVersion();
 
             // user language and locale for native clients
             $language = $this->l10nFactory->findLanguage();
@@ -97,12 +100,14 @@ final class OtherController extends ApiController
             return new JSONResponse([
                 // general stuff
                 'version' => $version,
+                'base_url' => $this->util->getBaseUrl(),
                 'vod_disable' => $this->systemConfig->get('memories.vod.disable'),
                 'video_default_quality' => $this->systemConfig->get('memories.video_default_quality'),
                 'places_gis' => $this->systemConfig->get('memories.gis_type'),
                 'places_search_url' => $this->systemConfig->get('memories.places.search.url'),
                 'map_tile_servers' => $this->systemConfig->get('memories.map.tile_servers'),
                 'map_tile_server_url' => $this->systemConfig->getUserMapTileServerUrl(),
+                'map_cluster_density' => $this->systemConfig->getUserMapClusterDensity(),
                 'language' => $language,
                 'locale' => $locale,
 
@@ -115,6 +120,7 @@ final class OtherController extends ApiController
                 'facerecognition_enabled' => $this->systemConfig->facerecognitionIsEnabled(),
                 'lens_enabled' => '' !== trim($this->lens->daemonUrl()),
                 'preview_generator_enabled' => $this->systemConfig->previewGeneratorIsEnabled(),
+                'vips_enabled' => $this->vips->isEnabled(),
 
                 // general settings
                 'timeline_path' => $this->systemConfig->getUserConfigValue('timelinePath', $this->systemConfig->get('memories.timeline.default_path')),
@@ -159,10 +165,16 @@ final class OtherController extends ApiController
     {
         return $this->util->guardEx(function () use ($pageController) {
             $info = [
-                'version' => $this->appManager->getAppVersion('memories'),
-                'baseUrl' => $this->urlGenerator->linkToRouteAbsolute('memories.Page.main'),
+                'version' => $this->util->getMemoriesVersion(),
+                'baseUrl' => $this->util->getBaseUrl(),
                 'loginFlowUrl' => $this->urlGenerator->linkToRouteAbsolute('core.ClientFlowLoginV2.init'),
             ];
+
+            try {
+                $info['appsPath'] = $this->appManager->getAppWebPath(Application::APPNAME);
+            } catch (AppPathNotFoundException) {
+                $info['appsPath'] = null;
+            }
 
             try {
                 $info['uid'] = $this->util->getUID();

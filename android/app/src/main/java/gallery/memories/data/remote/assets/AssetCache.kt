@@ -1,11 +1,11 @@
 package gallery.memories.data.remote.assets
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
-import org.json.JSONObject
+import androidx.core.net.toUri
 import java.io.File
 import java.security.MessageDigest
+import org.json.JSONObject
 
 /**
  * On-disk snapshots of the web app (one dir per server + manifest hash).
@@ -26,16 +26,22 @@ class AssetCache(private val ctx: Context) {
 
         /** Scheme + host + port of a describeApi baseUrl, e.g. https://cloud.example.com. */
         fun originOf(baseUrl: String): String {
-            val uri = Uri.parse(baseUrl)
+            val uri = baseUrl.toUri()
             val port = uri.port.takeIf { it > 0 }?.let { ":$it" } ?: ""
             return "${uri.scheme}://${uri.host}$port"
         }
 
-        /** Nextcloud web root (path prefix before index.php), "" for domain roots. */
+        /** Nextcloud web root (path prefix before index.php or pretty /apps/), "" for domain roots. */
         fun webrootOf(baseUrl: String): String {
-            val path = Uri.parse(baseUrl).path ?: ""
-            return path.substringBefore("/index.php/")
+            val path = baseUrl.toUri().path ?: ""
+            return WEBROOT_RE.find(path)?.groupValues?.get(1) ?: path.trimEnd('/')
         }
+
+        /** Web path the server installed the app under, e.g. /nc/custom_apps/memories; null if unknown. */
+        fun appsPathOf(describe: JSONObject): String? =
+            if (describe.isNull("appsPath")) null else describe.optString("appsPath").trimEnd('/').ifEmpty { null }
+
+        private val WEBROOT_RE = Regex("^(.*?)(?:/index\\.php)?/apps/memories(?:/.*)?$")
     }
 
     /** Snapshot dir for one manifest [key] (see [snapshotKey]). */
@@ -43,7 +49,7 @@ class AssetCache(private val ctx: Context) {
 
     /** Root dir for one server; the host is sanitized so it is a safe path segment. */
     fun serverDir(baseUrl: String): File {
-        val uri = Uri.parse(baseUrl)
+        val uri = baseUrl.toUri()
         val port = uri.port.takeIf { it > 0 }?.toString() ?: ""
         val safe = "${uri.scheme}_${uri.host}$port".replace(Regex("[^A-Za-z0-9_.-]"), "_")
         return File(ctx.applicationContext.filesDir, "offline/$safe")

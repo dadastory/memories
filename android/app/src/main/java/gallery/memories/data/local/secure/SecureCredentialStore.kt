@@ -4,15 +4,18 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
+import androidx.core.content.edit
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.IvParameterSpec
 
-/** Keystore-backed credential storage. Only the token is encrypted; the rest is plaintext prefs. */
+/** Keystore-backed credential storage. Only the token is encrypted; the rest is plaintext prefs. Also seals other secrets. */
 class SecureCredentialStore(private val context: Context) {
     companion object {
+        private val TAG = SecureCredentialStore::class.java.simpleName
         private const val KEY_ALIAS = "MemoriesKey"
         private const val PREFS_NAME = "credentials"
     }
@@ -29,16 +32,21 @@ class SecureCredentialStore(private val context: Context) {
         val cipher = getCipher()
         cipher.init(Cipher.ENCRYPT_MODE, getSecretKey())
         val encryptedToken = cipher.doFinal(cred.token.toByteArray())
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .putString("url", cred.url)
-            .putBoolean("trustAll", cred.trustAll)
-            .putString("username", cred.username)
-            .putString("encryptedToken", Base64.encodeToString(encryptedToken, Base64.DEFAULT))
-            .putString("iv", Base64.encodeToString(cipher.iv, Base64.DEFAULT))
-            .apply()
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+            putString("url", cred.url)
+            putBoolean("trustAll", cred.trustAll)
+            putString("username", cred.username)
+            putString("uid", cred.uid)
+            putString("encryptedToken", Base64.encodeToString(encryptedToken, Base64.DEFAULT))
+            putString("iv", Base64.encodeToString(cipher.iv, Base64.DEFAULT))
+        }
     }
 
-    /** Decrypted credentials, or null when logged out. Runs crypto on the caller thread. */
+    /**
+     * Decrypted credentials, or null when logged out. Runs crypto on the caller thread.
+     * An undecryptable token also reads as logged out; it stays stored so a transient
+     * Keystore error can't erase a login, and the next login overwrites it.
+     */
     fun getCredentials(): Credential? {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val url = prefs.getString("url", null)
@@ -47,18 +55,46 @@ class SecureCredentialStore(private val context: Context) {
         val encryptedToken = prefs.getString("encryptedToken", null)
         val ivStr = prefs.getString("iv", null)
         if (url != null && username != null && encryptedToken != null && ivStr != null) {
-            val cipher = getCipher()
-            cipher.init(Cipher.DECRYPT_MODE, getSecretKey(), IvParameterSpec(Base64.decode(ivStr, Base64.DEFAULT)))
-            val token = String(cipher.doFinal(Base64.decode(encryptedToken, Base64.DEFAULT)))
-            return Credential(url, trustAll, username, token)
+            return try {
+                val cipher = getCipher()
+                cipher.init(Cipher.DECRYPT_MODE, getSecretKey(), IvParameterSpec(Base64.decode(ivStr, Base64.DEFAULT)))
+                val token = String(cipher.doFinal(Base64.decode(encryptedToken, Base64.DEFAULT)))
+                Credential(url, trustAll, username, token, prefs.getString("uid", null))
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to decrypt stored credentials", e)
+                null
+            }
         }
         return null
     }
 
+    fun saveUid(uid: String) {
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit { putString("uid", uid) }
+    }
+
     fun deleteCredentials() {
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .remove("url").remove("trustAll").remove("username")
-            .remove("encryptedToken").remove("iv").apply()
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+            listOf("url", "trustAll", "username", "uid", "encryptedToken", "iv").forEach(::remove)
+        }
+    }
+
+    /** Encrypts [plain] into an opaque string for [decrypt]. */
+    fun encrypt(plain: String): String {
+        val cipher = getCipher()
+        cipher.init(Cipher.ENCRYPT_MODE, getSecretKey())
+        val data = cipher.doFinal(plain.toByteArray())
+        return Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" + Base64.encodeToString(data, Base64.NO_WRAP)
+    }
+
+    /** Reverses [encrypt]. Null when [sealed] is unreadable, e.g. the Keystore key changed. */
+    fun decrypt(sealed: String): String? = try {
+        val (iv, data) = sealed.split(":", limit = 2)
+        val cipher = getCipher()
+        cipher.init(Cipher.DECRYPT_MODE, getSecretKey(), IvParameterSpec(Base64.decode(iv, Base64.NO_WRAP)))
+        String(cipher.doFinal(Base64.decode(data, Base64.NO_WRAP)))
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to decrypt stored secret", e)
+        null
     }
 
     private fun generateNewKey() {

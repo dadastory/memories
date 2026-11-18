@@ -64,8 +64,11 @@ func TestMediaHTTPPlayback(t *testing.T) {
 				w := httptest.NewRecorder()
 				require.True(t, m.ServeChunkContext(t.Context(), w, quality, id))
 				require.Equal(t, http.StatusOK, w.Code)
-				segment := filepath.Join(t.TempDir(), "segment.ts")
-				require.NoError(t, os.WriteFile(segment, w.Body.Bytes(), 0600))
+				segment := filepath.Join(t.TempDir(), "segment.mp4")
+				init := httptest.NewRecorder()
+				require.True(t, m.ServeInitContext(t.Context(), init, quality))
+				require.Equal(t, http.StatusOK, init.Code)
+				require.NoError(t, os.WriteFile(segment, append(init.Body.Bytes(), w.Body.Bytes()...), 0600))
 				out, err := exec.CommandContext(t.Context(), "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,start_time", "-of", "json", segment).Output()
 				require.NoError(t, err)
 				var probe struct {
@@ -78,10 +81,10 @@ func TestMediaHTTPPlayback(t *testing.T) {
 				require.NoError(t, json.Unmarshal(out, &probe))
 				duration, err := strconv.ParseFloat(probe.Format.Duration, 64)
 				require.NoError(t, err)
-				require.InDelta(t, 4, duration, .5)
 				require.NotEmpty(t, probe.Streams)
 				pts, err := strconv.ParseFloat(probe.Streams[0].StartTime, 64)
 				require.NoError(t, err)
+				require.InDelta(t, 4, duration-pts, .5)
 				if id == 0 {
 					initialPTS = pts
 				} else {
@@ -95,14 +98,14 @@ func TestMediaHTTPPlayback(t *testing.T) {
 			// Wait for upstream encoder pacing: even a 60s fast synthetic file
 			// must not be fully encoded after requesting one four-second window.
 			time.Sleep(100 * time.Millisecond)
-			files, err := filepath.Glob(filepath.Join(m.tempDir, "*.ts"))
+			files, err := filepath.Glob(filepath.Join(m.tempDir, quality+"-[0-9]*.m4s"))
 			require.NoError(t, err)
 			require.LessOrEqual(t, len(files), cfg.GoalBufferMax+3)
 			s := m.streams[quality]
 			s.mutex.Lock()
 			s.stopCoder()
 			s.mutex.Unlock()
-			cached, err := os.ReadFile(s.getTsPath(10))
+			cached, err := os.ReadFile(s.getSegmentPath(10))
 			require.NoError(t, err)
 			w := httptest.NewRecorder()
 			m.ServeChunk(w, quality, 10)

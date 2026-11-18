@@ -41,6 +41,7 @@ use OCP\IAppConfig;
 use OCP\IDBConnection;
 use OCP\IRequest;
 use OCP\ISession;
+use Psr\Log\LoggerInterface;
 
 final class AdminController extends ApiController
 {
@@ -56,6 +57,7 @@ final class AdminController extends ApiController
         protected SystemConfig $systemConfig,
         protected BinExt $binExt,
         protected Util $util,
+        protected LoggerInterface $logger,
     ) {
         parent::__construct(Application::APPNAME, $request);
     }
@@ -104,12 +106,17 @@ final class AdminController extends ApiController
                 'memories.vod.ffprobe',
                 'memories.vod.external',
                 'memories.vod.disable',
+                'memories.vod.bridge.enabled',
+                'memories.vod.bridge.max_workers',
+                'memories.vod.bridge.min_workers',
+                'memories.vod.bridge.worker_ttl',
+                'memories.vod.bridge.idle_time',
             ], true)) {
                 try {
                     $this->binExt->pkill('go-vod');
                     $this->binExt->ensureGoVod();
                 } catch (\Exception $e) {
-                    error_log('Failed to start go-vod: '.$e->getMessage());
+                    $this->logger->error('Failed to start go-vod: '.$e->getMessage(), ['app' => Application::APPNAME]);
                 }
             }
 
@@ -158,6 +165,12 @@ final class AdminController extends ApiController
 
             // Check for PHP Imagick
             $status['imagick'] = class_exists('\Imagick') ? \Imagick::getVersion()['versionString'] : false;
+
+            // Check VIPS binary
+            $status['vips'] = $this->getExecutableStatus(
+                fn () => $this->binExt->getVipsBin(),
+                fn ($p) => $this->binExt->testVipsBin($p),
+            );
 
             // Check for bad encryption module
             $status['bad_encryption'] = $this->systemConfig->isEncryptionEnabled();
@@ -224,6 +237,7 @@ final class AdminController extends ApiController
                         'healthy' => true,
                         'detail' => $result['version'],
                         'latencyMs' => $result['latencyMs'],
+                        'pingMs' => $result['pingMs'],
                     ];
                 } catch (\Exception $e) {
                     $govods[] = [

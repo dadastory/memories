@@ -39,8 +39,9 @@ OC.L10N.register(
     "Home" : "Initio",
     "Previous" : "Previe",
     "Next" : "Proxime",
-    "Undo" : "Disfacer",
-    "Custom" : "Personalisate",
-    "Size" : "Dimension"
+    "Play" : "Reproducer",
+    "Fullscreen" : "Schermo plen",
+    "Pause" : "Pausar",
+    "None" : "Nulle"
 },
 "nplurals=2; plural=(n != 1);");

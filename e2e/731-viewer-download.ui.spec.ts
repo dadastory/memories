@@ -1,11 +1,8 @@
 import * as fs from 'fs';
-import { test, expect } from '@playwright/test';
-import { appUrl, bootstrap, e2eHeaders, teardown } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, openViewer } from './navigation';
 import { DavClient } from './utils';
 import { snap } from './screenshots';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({ extraHTTPHeaders: e2eHeaders() });
 
@@ -16,8 +13,7 @@ test.describe('@ui Viewer image download', () => {
     const size = (await dav.imageInfo(fileid)).size;
 
     await page.goto(appUrl);
-    await page.locator(`.p-outer--${fileid} > .img-outer`).click();
-    await page.waitForSelector('.memories-viewer.fully-opened');
+    await openViewer(page, fileid);
     await snap(page, 'viewer-image');
 
     const downloadPromise = page.waitForEvent('download');
@@ -45,8 +41,7 @@ test.describe('@ui Viewer live video download', () => {
     const fileid = await dav.fileid('/for-livephoto/apple_h264_boy_01.jpg');
 
     await page.goto(appUrl);
-    await page.locator(`.p-outer--${fileid} > .img-outer`).click();
-    await page.waitForSelector('.memories-viewer.fully-opened');
+    await openViewer(page, fileid);
 
     const downloadPromise = page.waitForEvent('download');
     await page.locator('.memories-viewer').getByRole('button', { name: 'Actions' }).click();

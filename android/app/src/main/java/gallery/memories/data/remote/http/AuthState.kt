@@ -1,6 +1,8 @@
 package gallery.memories.data.remote.http
 
 import android.util.Base64
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * Current server, credentials, and TLS mode. Rebuilt from storage on
@@ -8,7 +10,7 @@ import android.util.Base64
  */
 class AuthState {
     private var authHeader: String? = null
-    private var creds: Pair<String, String>? = null
+    private var uid: String? = null
     private var baseUrl: String? = null
     private var trustAll = false
 
@@ -20,11 +22,21 @@ class AuthState {
     /** Canonical server URL (the describeApi baseUrl), null when logged out. */
     fun baseUrl(): String? = baseUrl
 
+    /** Whether [url] is on the configured server: same scheme, host and port. */
+    fun isServer(url: HttpUrl?): Boolean {
+        val server = baseUrl?.toHttpUrlOrNull() ?: return false
+        return url != null && url.scheme == server.scheme && url.host == server.host && url.port == server.port
+    }
+
     /** Basic auth header value, null when logged out. */
     fun authHeader(): String? = authHeader
 
-    /** Raw (username, app password) pair, null when logged out. */
-    fun credentials(): Pair<String, String>? = creds
+    /** Server user ID, null when logged out. Falls back to the login name until known. */
+    fun uid(): String? = uid
+
+    fun setUid(uid: String) {
+        this.uid = uid
+    }
 
     /** Points at a server. Clears with a null url (see AccountManager.deleteCredentials). */
     fun build(url: String?, trustAll: Boolean) {
@@ -33,14 +45,14 @@ class AuthState {
     }
 
     /** Sets credentials, or clears them with null. */
-    fun setAuthHeader(credentials: Pair<String, String>?) {
+    fun setAuthHeader(credentials: Pair<String, String>?, uid: String? = null) {
         if (credentials != null) {
             val raw = "${credentials.first}:${credentials.second}"
             authHeader = "Basic ${Base64.encodeToString(raw.toByteArray(), Base64.NO_WRAP)}"
-            creds = credentials
+            this.uid = uid ?: credentials.first
             return
         }
         authHeader = null
-        creds = null
+        this.uid = null
     }
 }

@@ -2,6 +2,8 @@ package gallery.memories.upload
 
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
+import android.util.Log
 import gallery.memories.data.remote.assets.AssetCache
 import gallery.memories.data.remote.http.AuthState
 import gallery.memories.data.remote.http.HttpClients
@@ -12,6 +14,7 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -23,12 +26,11 @@ class UploadService(
     private val ctx: Context,
     private val timeline: TimelineRepository,
     private val auth: AuthState,
-    clients: HttpClients,
+    private val clients: HttpClients,
 ) {
-    // No write timeout: big uploads on slow links must not be cut off.
-    private val client = clients.newProxyClient().newBuilder()
-        .writeTimeout(0, TimeUnit.SECONDS)
-        .build()
+    private companion object {
+        val TAG = UploadService::class.java.simpleName
+    }
 
     /**
      * PUTs the device file behind [auid] to [destPath] (e.g. /Photos/IMG.jpg).
@@ -40,14 +42,14 @@ class UploadService(
         if (sysImgs.isEmpty()) throw Exception("Image not found")
         val img = sysImgs[0]
         val base = auth.baseUrl() ?: throw Exception("Not logged in")
-        val uid = auth.credentials()?.first ?: throw Exception("Not logged in")
+        val uid = auth.uid() ?: throw Exception("Not logged in")
         val url = davUrl(base, uid, destPath)
         val mime = img.mimeType.ifEmpty { "application/octet-stream" }
         val body = object : RequestBody() {
             override fun contentType() = mime.toMediaTypeOrNull()
             override fun contentLength() = img.size
             override fun writeTo(sink: BufferedSink) {
-                ctx.applicationContext.contentResolver.openInputStream(img.uri)?.use { input ->
+                openOriginal(img.uri)?.use { input ->
                     sink.outputStream().use { out -> input.copyTo(out) }
                 } ?: throw IOException("Image not found")
             }
@@ -58,12 +60,25 @@ class UploadService(
             .header("OCS-APIREQUEST", "true")
             .put(body)
             .build()
+        // No write timeout: big uploads on slow links must not be cut off.
+        val client = clients.proxyClient().newBuilder().writeTimeout(0, TimeUnit.SECONDS).build()
         client.newCall(request).execute().use { res ->
             if (res.code !in 200..299) throw Exception("Upload failed: HTTP ${res.code}")
             // oc-fileid is the DAV ID (zero-padded ID + instance ID);
             // the numeric ID is its leading digits, like parseInt elsewhere.
             val fileid = res.header("oc-fileid")?.takeWhile { it.isDigit() }?.toLongOrNull() ?: 0
             return JSONObject(mapOf("fileid" to fileid))
+        }
+    }
+
+    /** Unredacted bytes so backups keep GPS; the redacted file when ACCESS_MEDIA_LOCATION is missing. */
+    private fun openOriginal(uri: Uri): InputStream? {
+        val resolver = ctx.applicationContext.contentResolver
+        return try {
+            resolver.openInputStream(MediaStore.setRequireOriginal(uri))
+        } catch (e: Exception) {
+            Log.w(TAG, "Uploading without original metadata: ${e.message}")
+            resolver.openInputStream(uri)
         }
     }
 

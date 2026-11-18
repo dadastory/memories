@@ -1,4 +1,3 @@
-import { getFiles } from './base';
 import { generateUrl } from '@nextcloud/router';
 import { showError, showSuccess } from '@services/utils/dialog';
 import axios from '@nextcloud/axios';
@@ -6,9 +5,27 @@ import axios from '@nextcloud/axios';
 import { API } from '@services/API';
 import { translate as t } from '@services/l10n';
 import { routes } from '@services/router';
+import { getFiles } from '@services/dav/base';
+import client from '@services/dav/client';
+import * as xml from '@services/dav/xml';
+import * as utils from '@services/utils/common';
 
 import type { RouteLocationNormalized } from 'vue-router';
 import type { ClusterTypes, IPhoto } from '@typings';
+import type { FileStat, ResponseDataDetailed } from 'webdav';
+import type { AbortOpts } from '@services/utils/abort';
+
+/**
+ * Get the file ID of a path relative to the user's root folder.
+ */
+export async function getFileId(path: string, opts?: AbortOpts): Promise<number> {
+  const res = (await client.stat(`/files/${utils.uid}/${path.replace(/^\/+/, '')}`, {
+    data: xml.propfind(['oc:fileid']),
+    details: true,
+    signal: opts?.signal,
+  })) as ResponseDataDetailed<FileStat>;
+  return Number(res.data.props?.fileid ?? 0);
+}
 
 /**
  * Open the files app with the given photo

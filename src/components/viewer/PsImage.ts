@@ -1,9 +1,11 @@
 import { isVideoContent } from './PsVideo';
 import { isLiveContent } from './PsLivePhoto';
-import * as ximg from '../frame/XImgCache';
+import * as ximg from '@components/frame/XImgCache';
+import * as nativex from '@native';
+import { API } from '@services/API';
+import { isLikelySamePhoto } from '@services/utils/photo';
 
-import type PhotoSwipe from 'photoswipe';
-import type { PsContent, PsEvent, PsSlide } from './types';
+import type { PsContent, PsEvent, PsPhotoSwipe, PsSlide } from './types';
 
 import errorsvg from '@assets/error.svg';
 
@@ -16,13 +18,14 @@ export default class ImageContentSetup {
    */
   private stickySrcs = new Map<number, string>();
 
-  constructor(private lightbox: PhotoSwipe) {
+  constructor(private lightbox: PsPhotoSwipe) {
     lightbox.on('contentLoad', (e) => this.onContentLoad(e as unknown as PsEvent));
     lightbox.on('contentLoadImage', (e) => this.onContentLoadImage(e as unknown as PsEvent));
     lightbox.on('contentDestroy', (e) => this.onContentDestroy(e as unknown as PsEvent));
     lightbox.on('destroy', () => this.onDestroy());
     lightbox.on('zoomPanUpdate', (e) => this.zoomPanUpdate(e as unknown as { slide: PsSlide }));
-    lightbox.on('slideActivate', () => this.slideActivate());
+    lightbox.on('slideActivate', (e) => void this.slideActivate(e.slide as unknown as PsSlide));
+    lightbox.on('slideDeactivate', (e) => this.slideDeactivate(e.slide as unknown as PsSlide));
     lightbox.addFilter('isContentLoading', (l, c) => this.isContentLoading(l, c as unknown as PsContent));
     lightbox.addFilter('placeholderSrc', (s, c) => this.placeholderSrc(s, c as unknown as PsContent));
   }
@@ -33,10 +36,15 @@ export default class ImageContentSetup {
 
   public onContentLoad(e: PsEvent) {
     if (isVideoContent(e.content) || isLiveContent(e.content)) return;
-
-    // Insert image throgh XImgCache
     e.preventDefault();
-    e.content.element = this.getXImgElem(e.content, () => e.content.onLoaded());
+
+    // Create container
+    const container = document.createElement('div');
+    container.classList.add('pswp__img');
+    e.content.element = container;
+
+    // Lazy create the preview element
+    void this.createPreviewElement(e.content);
   }
 
   public onContentLoadImage(e: PsEvent) {
@@ -71,39 +79,51 @@ export default class ImageContentSetup {
     return placeholderSrc;
   }
 
-  public getXImgElem(content: PsContent, onLoad: () => void): HTMLImageElement {
+  public async createPreviewElement(content: PsContent) {
     const img = document.createElement('img');
-    img.classList.add('pswp__img', 'ximg');
-    img.style.visibility = 'hidden';
+    img.classList.add('ximg', 'ximg--preview');
 
-    // Callback on error or load
-    img.onerror = img.onload = () => {
-      img.onerror = img.onload = null;
-      img.style.visibility = 'visible';
-      onLoad();
-      this.slideActivate();
-    };
+    try {
+      // Fetch with Axios
+      const blobUrl = await ximg.fetchImage(content.data.src);
 
-    // Set src on element if content is available
-    const src = (url: string) => {
+      // Prevent garbage collection of the blob URL
       if (content.element) {
-        img.src = url;
-
-        // Prevent garbage collection of the blob URL
-        this.setSticky(content.data.photo.fileid, url);
+        this.setSticky(content.data.photo.fileid, blobUrl);
       }
-    };
 
-    // Fetch with Axios
-    ximg
-      .fetchImage(content.data.src)
-      .then(src)
-      .catch((e) => {
-        src(errorsvg);
-        console.error('Error loading PsImage:', e);
-      });
+      // Force decoding off-screen.
+      img.src = blobUrl;
+      await img.decode();
+    } catch (e) {
+      img.src = errorsvg;
+      console.error('Error loading PsImage:', e);
+    }
 
-    return img;
+    // Add the preview image to the main content.
+    if (!content.element) return;
+    content.element.appendChild(img);
+    content.onLoaded();
+
+    // Create a lightweight preview for closing animation.
+    // Especially relevant when the main preview is U-HDR.
+    void this.createLightPreviewElement(content);
+  }
+
+  private async createLightPreviewElement(content: PsContent) {
+    if (!content.data.msrc?.startsWith('blob:')) return;
+
+    try {
+      const thumbImg = document.createElement('img');
+      thumbImg.src = content.data.msrc;
+      thumbImg.classList.add('ximg', 'ximg--thumbnail');
+      await thumbImg.decode();
+
+      if (!content.element) return;
+      content.element.prepend(thumbImg);
+    } catch (e) {
+      console.error('Error creating light preview:', e);
+    }
   }
 
   public zoomPanUpdate({ slide }: { slide: PsSlide }) {
@@ -120,38 +140,80 @@ export default class ImageContentSetup {
     }
   }
 
-  public slideActivate() {
-    const slide = this.lightbox.currSlide as unknown as PsSlide | undefined;
-    if (slide?.data.highSrcCond === 'always') {
-      this.loadFullImage(slide);
+  public async slideActivate(slide: PsSlide) {
+    if (nativex.viewImageIsEnabled() && !slide.data.nxImageState && !isVideoContent(slide.content)) {
+      await this.nxViewImageUpload(slide, slide.data.src, undefined);
+      if (!slide.data.nxImageState) return; // deactivated
+    }
+
+    if (slide.data.highSrcCond === 'always') {
+      void this.loadFullImage(slide);
+    }
+  }
+
+  public slideDeactivate(slide: PsSlide) {
+    slide.data.nxImageState = undefined;
+
+    // The native view is actually destroyed, so we'll need to load
+    // full res image again if we come back to this slide.
+    if (slide.data.highSrcCondRestore) {
+      slide.data.highSrcCond = slide.data.highSrcCondRestore;
+      slide.data.highSrcCondRestore = undefined;
     }
   }
 
   private async loadFullImage(slide: PsSlide) {
-    if (!slide.data.highSrc.length) return;
+    if (!slide.data.highSrc.length || slide.data.highSrcCond === 'never') return;
 
-    // Get ximg element
-    const img = slide.holderElement?.querySelector('.ximg:not(.ximg--full)') as HTMLImageElement;
-    if (!img) return;
+    // Reset view on deactivate on native (no preservation).
+    if (nativex.viewImageIsEnabled()) {
+      slide.data.highSrcCondRestore = slide.data.highSrcCond;
+    }
 
     // Don't load again
     slide.data.highSrcCond = 'never';
 
-    // Load full image at secondary zoom level
-    img.classList.add('ximg--full');
+    // Prefer the on-device original if available.
+    if (nativex.viewImageIsEnabled()) {
+      const photo = slide.data.photo;
+      let localUri = photo.local_uri;
+      if (!localUri && isLikelySamePhoto(photo, photo.local_photo)) {
+        localUri = photo.local_photo.local_uri;
+      }
+      if (localUri && (await this.nxViewImageUpload(slide, undefined, localUri))) return;
+    }
 
     this.loading++;
     this.lightbox.ui?.updatePreloaderVisibility();
 
     for (const src of slide.data.highSrc) {
       try {
-        const blobSrc = await ximg.fetchImage(src);
+        // Native clients decode HEVC, so request the original file directly.
+        const url = nativex.viewImageIsEnabled() ? API.Q(src, { hevc: true }) : src;
+
+        // Do this first always to ensure the image exists.
+        const blobSrc = await ximg.fetchImage(url);
+
+        // If we have a native view upload there directly.
+        if (nativex.viewImageIsEnabled()) {
+          if (await this.nxViewImageUpload(slide, url, undefined)) {
+            break; // success
+          }
+          continue;
+        }
+
+        // Create HTML image and pre-decode.
+        const image = new Image();
+        image.src = blobSrc;
+        image.classList.add('ximg', 'ximg--full');
+        await image.decode();
 
         // Check if destroyed already
-        if (!slide.content.element) break;
+        const container = slide.content.element;
+        if (!container) break;
 
         // Show image and prevent garbage collection.
-        img.src = blobSrc;
+        container.appendChild(image);
 
         // If the preview was already loaded, then it will automatically be released.
         this.setSticky(slide.data.photo.fileid, blobSrc);
@@ -181,5 +243,44 @@ export default class ImageContentSetup {
     if (!src) return;
     ximg.sticky(src, -1);
     this.stickySrcs.delete(fileid);
+  }
+
+  /** Fetch the preview blob and POST it. */
+  private async nxViewImageUpload(slide: PsSlide, remote: string | undefined, local: string | undefined) {
+    if (slide.data.nxImageState !== 'loaded') {
+      slide.data.nxImageState = 'loading';
+    }
+    const onload = () => {
+      if (!slide.data.nxImageState) return; // slide deactivated
+      slide.data.nxImageState = 'loaded';
+      this.lightbox.dispatch('initialZoomPan');
+    };
+
+    if (local) {
+      try {
+        if (!(await nativex.viewImageLocal(local))) return true; // superseded
+        slide.data.highSrcCond = 'never'; // already max-res
+        onload();
+        return true;
+      } catch (e) {
+        console.warn('Failed to view image locally.', e);
+      }
+    }
+    if (!remote) return false;
+
+    try {
+      const blobUrl = await ximg.fetchImage(remote);
+      const res = await fetch(blobUrl);
+      const blob = await res.blob();
+      if (await nativex.viewImageUpload(blob)) onload();
+      return true;
+    } catch (e) {
+      console.error('Error uploading image to native viewer:', e);
+      if (slide.data.nxImageState !== 'loaded') {
+        slide.data.nxImageState = 'error';
+      }
+    }
+
+    return false;
   }
 }

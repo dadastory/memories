@@ -21,6 +21,7 @@ object TimelineJson {
         const val EPOCH = "epoch"
         const val AUID = "auid"
         const val BUID = "buid"
+        const val LOCAL_URI = "local_uri"
         const val LOCAL_HAS_REMOTE = "local_has_remote"
         const val DAYID = "dayid"
         const val ISVIDEO = "isvideo"
@@ -59,6 +60,7 @@ object TimelineJson {
         const val ID = "id"
         const val NAME = "name"
         const val ENABLED = "enabled"
+        const val COUNT = "count"
     }
 
     object Other {

@@ -29,7 +29,7 @@ use OCA\Memories\Db\FsManager;
 use OCA\Memories\Db\TimelineQuery;
 use OCA\Memories\Exceptions;
 use OCA\Memories\Exif;
-use OCA\Memories\Service;
+use OCA\Memories\Preview\Vips;
 use OCA\Memories\Service\Index;
 use OCA\Memories\Settings\SystemConfig;
 use OCA\Memories\Util;
@@ -49,6 +49,15 @@ const IMAGICK_SAFE = '/^image\/(x-)?(png|jpeg|gif|bmp|tiff|webp|hei(f|c)|avif|dc
 
 final class ImageController extends ApiController
 {
+    /** Output extension to normalized extension. */
+    private const EDIT_EXTENSION_MAP = [
+        'jpg' => 'jpg',
+        'jpeg' => 'jpg',
+        'png' => 'png',
+        'webp' => 'webp',
+        'avif' => 'avif',
+    ];
+
     public function __construct(
         IRequest $request,
         protected FsManager $fs,
@@ -62,6 +71,7 @@ final class ImageController extends ApiController
         protected SystemConfig $systemConfig,
         protected Util $util,
         protected Index $index,
+        protected Vips $vips,
     ) {
         parent::__construct(Application::APPNAME, $request);
     }
@@ -99,6 +109,11 @@ final class ImageController extends ApiController
                 throw Exceptions::NotFound($e->getMessage());
             }
 
+            // Stream the preview file directly without buffering into PHP
+            $response = new Http\FileDisplayResponse($preview, Http::STATUS_OK, [
+                'Content-Type' => $preview->getMimeType(),
+            ]);
+
             // Get the filename. We need to move the extension from
             // the preview file to the filename's end if it's not there
             // Do the comparison case-insensitive
@@ -108,9 +123,7 @@ final class ImageController extends ApiController
                     $filename .= '.'.$ext;
                 }
             }
-
-            // Generate response with proper content-disposition
-            $response = new Http\DataDownloadResponse($preview->getContent(), $filename, $preview->getMimeType());
+            $response->addHeader('Content-Disposition', Util::getContentDisposition($filename));
             $response->cacheFor(3600 * 24, false, true);
 
             return $response;
@@ -129,15 +142,20 @@ final class ImageController extends ApiController
             // Filter files with valid parameters
             $files = array_filter($files, static function (array $file) {
                 return isset($file['reqid'], $file['fileid'], $file['x'], $file['y'], $file['a'])
-                    && (int) $file['fileid'] > 0
-                    && (int) $file['x'] > 0
-                    && (int) $file['y'] > 0;
+                    && ((int) $file['fileid'] > 0)
+                    && ((int) $file['x'] > 0 || -1 === (int) $file['y'])
+                    && ((int) $file['y'] > 0 || -1 === (int) $file['x']);
             });
 
             // Sort files by size, ascending
             usort($files, static function (array $a, array $b) {
-                $aArea = (int) $a['x'] * (int) $a['y'];
-                $bArea = (int) $b['x'] * (int) $b['y'];
+                $ax = (int) $a['x'];
+                $ay = (int) $a['y'];
+                $bx = (int) $b['x'];
+                $by = (int) $b['y'];
+
+                $aArea = $ax > 0 && $ay > 0 ? $ax * $ay : PHP_INT_MAX;
+                $bArea = $bx > 0 && $by > 0 ? $bx * $by : PHP_INT_MAX;
 
                 return $aArea <=> $bArea;
             });
@@ -172,29 +190,35 @@ final class ImageController extends ApiController
                     // Add this preview to the response
                     $file = $this->fs->getUserFile($fileid);
                     $preview = $this->preview->getPreview($file, $x, $y, !$a, \OCP\IPreview::MODE_FILL);
-                    $content = $preview->getContent();
-                    if (empty($content)) {
+                    $size = (int) $preview->getSize();
+                    if ($size <= 0) {
                         continue;
                     }
 
-                    ob_start();
+                    $stream = $preview->read();
+                    if (false === $stream) {
+                        continue;
+                    }
+
                     // Encode parameters
                     $json = json_encode([
                         'reqid' => $reqid,
-                        'len' => \strlen($content),
+                        'len' => $size,
                         'type' => $preview->getMimeType(),
                     ]);
 
                     // Send the length of the json as a single byte
-                    if (\strlen($json) > 255) {
+                    if (false === $json || \strlen($json) > 255) {
+                        fclose($stream);
+
                         continue;
                     }
                     $out->setOutput(\chr(\strlen($json)));
                     $out->setOutput($json);
 
-                    // Send the image
-                    $out->setOutput($content);
-                    ob_end_flush();
+                    // Stream the image
+                    $out->setReadfile($stream);
+                    fclose($stream);
                 } catch (\OCP\Files\NotFoundException $e) {
                     continue;
                 } catch (\Exception $e) {
@@ -372,13 +396,16 @@ final class ImageController extends ApiController
      * Get a full resolution decodable image for editing from a file.
      * The returned image may be png / webp / avif / jpeg / gif.
      * These formats are supported by all browsers.
+     *
+     * @param string $id   the FileID of the image
+     * @param bool   $hevc whether the client supports HEVC
      */
     #[NoAdminRequired]
     #[NoCSRFRequired]
     #[PublicPage]
-    public function decodable(string $id): Http\Response
+    public function decodable(string $id, bool $hevc = false): Http\Response
     {
-        return $this->util->guardEx(function () use ($id) {
+        return $this->util->guardEx(function () use ($id, $hevc) {
             $file = $this->fs->getUserFile((int) $id);
 
             // Check if valid image
@@ -397,7 +424,27 @@ final class ImageController extends ApiController
             }
 
             // Stream directly if browser-decodable to avoid buffering into PHP
-            if (preg_match('/^image\/(png|webp|avif|jpeg|gif)$/', $mimetype)) {
+            $directMimes = [
+                'image/png',
+                'image/webp',
+                'image/avif',
+                'image/jpeg',
+                'image/gif',
+            ];
+
+            // Client can indicate support for HEVC images.
+            if ($hevc) {
+                array_push(
+                    $directMimes,
+                    'image/heic',
+                    'image/heif',
+                    'image/x-heic',
+                    'image/x-heif',
+                );
+            }
+
+            // Stream directly if mimetype matches.
+            if (\in_array($mimetype, $directMimes, true)) {
                 $response = new Http\FileDisplayResponse($file, Http::STATUS_OK, ['Content-Type' => $mimetype]);
                 $response->cacheFor(3600 * 24, false, false);
 
@@ -406,13 +453,17 @@ final class ImageController extends ApiController
 
             // Convert image to JPEG (reads from local path to avoid buffering into PHP)
             $path = $file->getStorage()->getLocalFile($file->getInternalPath());
-            [$blob, $mimetype] = $this->getImageJPEG($path, $mimetype);
+            [$blob, $mimetype, $provider] = $this->getImageJPEG($path, $mimetype);
 
             // Return the image
             $response = new Http\DataDownloadResponse($blob, $file->getName().'.jpg', $mimetype);
             $response->setETag($etag);
             $response->setLastModified((new \DateTime())->setTimestamp($file->getMTime()));
             $response->cacheFor(3600 * 24, false, false);
+
+            if ($this->systemConfig->get('debug')) {
+                $response->addHeader('X-Preview-Provider', $provider);
+            }
 
             return $response;
         });
@@ -423,24 +474,29 @@ final class ImageController extends ApiController
     public function editImage(
         int $id,
         string $name,
-        int $width,
-        int $height,
-        ?float $quality,
         string $extension,
-        array $state,
+        array $edits = [],
+        int $quality = 90,
+        bool $copy = false,
     ): Http\Response {
-        return $this->util->guardEx(function () use ($id, $name, $width, $height, $quality, $extension, $state) {
+        return $this->util->guardEx(function () use ($id, $name, $extension, $edits, $quality, $copy) {
+            // The editor runs entirely through the static vips binary.
+            if (!$this->vips->isEnabled()) {
+                throw Exceptions::Forbidden('VIPS is not available');
+            }
+
             // Get the file
             $file = $this->fs->getUserFile($id);
 
-            // Live photos must always be saved as a copy.
-            $isLivePhoto = (bool) $this->tq->getLiveId($file->getId());
-            if ($isLivePhoto && $name === $file->getName()) {
-                $name = $file->getParent()->getNonExistingName($name);
+            // Only images may be edited.
+            $mime = $file->getMimeType();
+            if (!\in_array($mime, Application::IMAGE_MIMES, true)) {
+                throw Exceptions::Forbidden('Not an image');
             }
 
-            // Check if creating a copy
-            $copy = $name !== $file->getName();
+            // Live photos must always be saved as a copy.
+            $isLivePhoto = (bool) $this->tq->getLiveId($file->getId());
+            $copy = $copy || $isLivePhoto || $name !== $file->getName();
 
             // Single-file shares must not allow copy-edit.
             if ($copy && $this->fs->getShareNode() instanceof \OCP\Files\File) {
@@ -456,52 +512,24 @@ final class ImageController extends ApiController
             if ('.' === $name || '..' === $name || !preg_match('/^[^\/\0[:cntrl:]]+\z/u', $name)) {
                 throw Exceptions::BadRequest('Invalid file name');
             }
-            if (!\in_array(strtolower($extension), ['jpeg', 'jpg', 'png', 'webp'], true)) {
+            $extLower = strtolower($extension);
+            if (!isset(self::EDIT_EXTENSION_MAP[$extLower])) {
                 throw Exceptions::BadRequest('Invalid image format');
             }
+            if ($quality < 10 || $quality > 100) {
+                throw Exceptions::BadRequest('Invalid quality');
+            }
 
-            // Check if target copy file exists
-            if ($copy && $file->getParent()->nodeExists($name)) {
-                throw Exceptions::ForbiddenFileUpdate($name);
+            // Copies never overwrite, pick the next free name.
+            if ($copy && ($name === $file->getName() || $file->getParent()->nodeExists($name))) {
+                $name = $file->getParent()->getNonExistingName($name);
             }
 
             // Read the image from the local path to avoid buffering into PHP
             $path = $file->getStorage()->getLocalFile($file->getInternalPath());
-            $image = self::getImagick($path);
 
-            // Due to a bug in filerobot, the provided width and height may be swapped
-            // 1. If the user does not rotate the image, we're fine
-            // 2. If image is rotated and user doesn't change the save resolution,
-            //    the wxh corresponds to the original image, not the rotated one
-            // 3. If image is rotated and user changes the save resolution,
-            //    the wxh corresponds to the rotated image.
-            $iw = $image->getImageWidth();
-            $ih = $image->getImageHeight();
-            $shouldResize = $width !== $iw || $height !== $ih;
-
-            // Apply the edits
-            (new Service\FileRobotMagick($image, $state))->apply();
-
-            // Resize the image
-            $iw = $image->getImageWidth();
-            $ih = $image->getImageHeight();
-            if ($shouldResize && $width && $height && ($iw !== $width || $ih !== $height)) {
-                if ($width < 1 || $height < 1 || $width > 100000 || $height > 100000) {
-                    throw Exceptions::BadRequest('Invalid image dimensions');
-                }
-                $image->resizeImage($width, $height, \Imagick::FILTER_LANCZOS, 1, true);
-            }
-
-            // Set image format
-            $image->setImageFormat($extension);
-
-            // Set quality if specified
-            if (null !== $quality && $quality >= 0 && $quality <= 1) {
-                $image->setImageCompressionQuality((int) round(100.0 * $quality));
-            }
-
-            // Save the image
-            $blob = $image->getImageBlob();
+            // Apply the vips-editor edits via the static vips binary.
+            $blob = $this->editImageVips($path, $extLower, $edits, $quality);
 
             // Strip live photo identifiers.
             if ($isLivePhoto) {
@@ -546,18 +574,73 @@ final class ImageController extends ApiController
     }
 
     /**
+     * Apply vips-editor edits via the static vips binary.
+     *
+     * @param array<int, array<string, mixed>> $edits
+     */
+    private function editImageVips(string $path, string $extension, array $edits, int $quality): string
+    {
+        // Basic shape check so vips errors stay actionable.
+        // Cap count and payload size: editImage runs under a 30s exec budget.
+        if (\count($edits) > 32) {
+            throw Exceptions::BadRequest('Too many edits');
+        }
+        foreach ($edits as $edit) {
+            /** @psalm-suppress DocblockTypeContradiction */
+            if (!\is_array($edit) || !isset($edit['edit']) || !\is_string($edit['edit'])) {
+                throw Exceptions::BadRequest('Invalid edit entry');
+            }
+            if (\strlen($edit['edit']) > 64) {
+                throw Exceptions::BadRequest('Invalid edit entry');
+            }
+        }
+        $raw = json_encode($edits);
+        if (!\is_string($raw) || \strlen($raw) > 1024 * 1024) {
+            throw Exceptions::BadRequest('Edits payload too large');
+        }
+
+        // Saver is picked from the output extension.
+        $normalized = self::EDIT_EXTENSION_MAP[$extension] ?? null;
+        if (null === $normalized) {
+            throw Exceptions::BadRequest('Invalid image format');
+        }
+        $output = 'output.'.$normalized;
+
+        try {
+            $blob = $this->vips->convertFormat($path, $output, $quality, $edits);
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            // Edit validation errors come from the vips edits parser.
+            if (str_contains($msg, 'edits[')) {
+                throw Exceptions::BadRequest($msg);
+            }
+
+            throw Exceptions::Forbidden('VIPS failed: '.$msg);
+        }
+
+        return $blob;
+    }
+
+    /**
      * Given an image file, return a JPEG blob.
      *
      * @param string $path     Local filesystem path of the image
      * @param string $mimetype Mimetype of image data
      *
-     * @return string[] [blob, mimetype]
+     * @return string[] [blob, mimetype, provider]
      *
-     * @psalm-return list{string, string}
+     * @psalm-return list{string, string, string}
      */
     private function getImageJPEG(string $path, $mimetype): array
     {
-        // TODO: Use imaginary if available (once HEIC isn't broken)
+        // Prefer vips convert when available (faster, no imagick needed)
+        if ($this->vips->isEnabled()) {
+            try {
+                return [$this->vips->convertFormat($path, 'output.jpg', 85), 'image/jpeg', 'vips'];
+            } catch (\Throwable) {
+                // fall through to imagick
+            }
+        }
 
         // Read from the local path to avoid buffering the file into PHP
         $image = self::getImagick($path);
@@ -575,7 +658,7 @@ final class ImageController extends ApiController
             $image->clear();
         }
 
-        return [$blob, $mimetype];
+        return [$blob, $mimetype, 'imagick'];
     }
 
     /**
@@ -591,7 +674,7 @@ final class ImageController extends ApiController
         }
 
         // Get the tag ids for this file
-        $tagIds = $this->tagObjectMapper->getTagIdsForObjects([(string) $fileId], 'files')[(string) $fileId];
+        $tagIds = current($this->tagObjectMapper->getTagIdsForObjects([(string) $fileId], 'files')) ?: [];
 
         // Get all matching tag objects
         $tags = $this->tagManager->getTagsByIds($tagIds);

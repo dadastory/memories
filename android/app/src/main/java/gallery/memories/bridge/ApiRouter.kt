@@ -2,7 +2,6 @@ package gallery.memories.bridge
 
 import android.net.Uri
 import android.webkit.WebResourceResponse
-import androidx.media3.common.util.UnstableApi
 import gallery.memories.NativeX
 import gallery.memories.auth.AccountManager
 import gallery.memories.data.local.media.ImageService
@@ -13,9 +12,7 @@ import gallery.memories.ui.permissions.PermissionsManager
 import gallery.memories.upload.UploadService
 import org.json.JSONObject
 import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 
-@UnstableApi
 /**
  * Maps localhost bridge paths (/api/…, /image/…) to app services.
  * GET-only; the caller handles method gating and error mapping.
@@ -69,8 +66,13 @@ class ApiRouter(
             path.matches(NativeX.API.SHARE_URL) -> BridgeResponses.json(share.shareUrl(decode(parts[4])))
             path.matches(NativeX.API.SHARE_BLOB) -> BridgeResponses.json(share.shareBlobs())
             path.matches(NativeX.API.CONFIG_ALLOW_MEDIA) -> {
-                permissions.setAllowMedia(true)
-                if (permissions.requestMediaPermissionSync()) onAllowMedia()
+                val allow = parts[4] != "0"
+                permissions.setAllowMedia(allow)
+                if (allow && permissions.requestMediaPermissionSync()) onAllowMedia()
+                BridgeResponses.json("done")
+            }
+            path.matches(NativeX.API.CONFIG_ALLOW_MANAGE_MEDIA) -> {
+                permissions.requestManageMedia()
                 BridgeResponses.json("done")
             }
             path.matches(NativeX.API.ASSETS_PROGRESS) -> BridgeResponses.json(assets.progressJson())
@@ -78,5 +80,5 @@ class ApiRouter(
         }
     }
 
-    private fun decode(segment: String): String = URLDecoder.decode(segment, StandardCharsets.UTF_8)
+    private fun decode(segment: String): String = URLDecoder.decode(segment, "UTF-8")
 }

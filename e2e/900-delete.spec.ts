@@ -1,9 +1,6 @@
-import { test, expect } from '@playwright/test';
-import { appUrl, e2eHeaders, bootstrap, teardown } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, selectPhoto, openViewer } from './navigation';
 import { DavClient } from './utils';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({
   extraHTTPHeaders: e2eHeaders({
@@ -29,10 +26,8 @@ test.describe('@ui Timeline photo deletion', () => {
     await page.goto(appUrl);
 
     await test.step('Select two images', async () => {
-      await page.hover(`.p-outer--${fileid1}`);
-      await page.locator(`.p-outer--${fileid1} > div.select`).click();
-      await page.hover(`.p-outer--${fileid2}`);
-      await page.locator(`.p-outer--${fileid2} > div.select`).click();
+      await selectPhoto(page, fileid1);
+      await selectPhoto(page, fileid2);
     });
 
     await test.step('Submit delete', async () => {
@@ -41,8 +36,13 @@ test.describe('@ui Timeline photo deletion', () => {
     });
 
     await test.step('Verify timeline', async () => {
-      await expect(page.locator(`.p-outer--${fileid1}`)).toHaveCount(0);
-      await expect(page.locator(`.p-outer--${fileid2}`)).toHaveCount(0);
+      await expect(page.locator(`.p-outer--${fileid1}:visible`)).toHaveCount(0);
+      await expect(page.locator(`.p-outer--${fileid2}:visible`)).toHaveCount(0);
+    });
+
+    await test.step('Verify on server', async () => {
+      expect((await request.get(`${appUrl}/api/image/info/${fileid1}`)).status()).toBe(404);
+      expect((await request.get(`${appUrl}/api/image/info/${fileid2}`)).status()).toBe(404);
     });
   });
 
@@ -52,12 +52,11 @@ test.describe('@ui Timeline photo deletion', () => {
 
     await test.step('Open viewer', async () => {
       await page.goto(appUrl);
-      await page.locator(`.p-outer--${fileid3}`).click();
-      await page.waitForSelector('.memories-viewer.fully-opened');
+      await openViewer(page, fileid3);
     });
 
     // Get the the current active image so we can recheck.
-    const activeSelector = '.pswp__item.active img.ximg';
+    const activeSelector = '.pswp__item.active img.ximg--preview';
     const activeImg = page.locator(activeSelector);
     await expect(activeImg).toHaveAttribute('src', /.+/);
     const activePrev = await activeImg.getAttribute('src');
@@ -88,6 +87,10 @@ test.describe('@ui Timeline photo deletion', () => {
 
     await test.step('Verify timeline', async () => {
       await expect(page.locator(`.p-outer--${fileid3}`)).not.toBeVisible();
+    });
+
+    await test.step('Verify on server', async () => {
+      expect((await request.get(`${appUrl}/api/image/info/${fileid3}`)).status()).toBe(404);
     });
   });
 });

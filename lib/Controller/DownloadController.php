@@ -178,7 +178,6 @@ final class DownloadController extends ApiController
             $seekEnd = max(0, $size - 1);
 
             $sendRangeNotSatisfiable = static function () use ($out, $size): void {
-                $out->setHttpResponseCode(416);
                 $out->setHeader('HTTP/1.1 416 Range Not Satisfiable');
                 $out->setHeader("Content-Range: bytes */{$size}");
                 $out->setHeader('Accept-Ranges: bytes');
@@ -234,7 +233,6 @@ final class DownloadController extends ApiController
 
             // Send partial content header if a range was requested
             if ($isRange) {
-                $out->setHttpResponseCode(206); // see Util::guardExDirect
                 $out->setHeader('HTTP/1.1 206 Partial Content');
                 $out->setHeader("Content-Range: bytes {$seekStart}-{$seekEnd}/{$size}");
             }
@@ -260,9 +258,8 @@ final class DownloadController extends ApiController
             $out->setHeader('Cache-Control: private, max-age=3600');
 
             // Play media inline for in-browser playback; force a download for everything else
-            $filename = str_replace('"', '\"', $file->getName());
-            $disposition = !$attachment && $isMedia && $resumable ? 'inline' : 'attachment';
-            $out->setHeader("Content-Disposition: {$disposition}; filename=\"{$filename}\"");
+            $disposition = !$attachment && $isMedia && $resumable ? Util::DISPOSITION_INLINE : Util::DISPOSITION_ATTACHMENT;
+            $out->setHeader('Content-Disposition: '.Util::getContentDisposition($file->getName(), $disposition));
 
             // Quit if HEAD request or empty file
             if ('HEAD' === $this->request->getMethod() || 0 === $size) {
@@ -324,6 +321,9 @@ final class DownloadController extends ApiController
 
             // Create a zip file
             $streamer->sendHeaders("{$name}.zip");
+
+            // ZipStreamer advertises ranges, but this stream is not seekable
+            $out->setHeader('Accept-Ranges: none');
 
             // Quit if HEAD request
             if ('HEAD' === $this->request->getMethod()) {

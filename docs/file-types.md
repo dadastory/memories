@@ -8,11 +8,33 @@ description: Steps to configure support for different image and video formats
 
     It is **strongly recommended** that you use the Memories admin interface to configure file type support. This will ensure that your configuration is valid and that you do not accidentally disable support for any file types.
 
-Please note that if Imaginary is configured on your instance like on Nextcloud AIO, you do not need to follow this documentation any further; most file types should work out-of-the-box.
-
-Memories supports the file types supported by Nextcloud. File type support is determined in part by the values listed in the `enabledPreviewProviders` configuration parameter in your configuration file. If your `config.php` does not contain an `enabledPreviewProviders` array, this means you are using Nextcloud's defaults. Copy the array over from `config.sample.php` before adding any of the values below, or else you will effectively disable all of the defaults.
+Memories supports the file types supported by Nextcloud. File type support is determined in part by the values listed in the `enabledPreviewProviders` configuration parameter in your configuration file. If your `config.php` does not contain an `enabledPreviewProviders` array, you are using Nextcloud's defaults. If you add one manually, copy the full array from `config.sample.php` first, or you will disable all defaults.
 
 If you add support for any one of the file types below, you must run `occ memories:index` to index these files.
+
+## VIPS (built-in)
+
+!!! warning "No configuration needed"
+
+    Memories ships statically-linked `vips` binaries and registers preview providers for common image formats out-of-the-box. When enabled, you do **not** need to configure anything below for image formats.
+
+The following formats are covered with no extra dependencies:
+
+```
+JPEG (image/jpeg)
+PNG (image/png)
+GIF (image/gif)
+WebP (image/webp)
+AVIF (image/avif)
+HEIC (image/heic)
+HEIF (image/heif)
+TIFF (image/tiff)
+RAW (image/x-dcraw)
+```
+
+These providers take priority over the Nextcloud core providers: if vips successfully generates a preview, it is used; otherwise generation falls through to the next matching provider.
+
+Camera RAW previews can be disabled in the admin interface (`memories.vips.raw.enabled`).
 
 ## Common Formats
 
@@ -38,7 +60,7 @@ These are enabled by inclusion of the following values in `config.php`'s `enable
   'OC\Preview\TIFF',
 ```
 
-You must also install Imagemagick (included in the official Nextcloud docker image).
+You must also install ImageMagick with HEIC/TIFF support (included in the official Nextcloud Docker image).
 
 ## Videos
 
@@ -48,8 +70,9 @@ These are enabled by inclusion of the following value in `config.php`'s `enabled
   'OC\Preview\Movie',
 ```
 
-You must also install `ffmpeg` and add the video config to `config.php`.
+You must also install `ffmpeg` and `ffprobe` and configure `memories.vod.ffmpeg` and `memories.vod.ffprobe` (see admin panel).
 
-## RAW images
+## RAW files
 
-Install the [camera raw previews](https://github.com/ariselseng/camerarawpreviews) app from the Nextcloud app store.
+Covered by VIPS out-of-the-box (see above). If VIPS RAW support is disabled,
+install the [camera raw previews](https://github.com/ariselseng/camerarawpreviews) app from the Nextcloud app store.

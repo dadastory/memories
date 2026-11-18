@@ -1,8 +1,5 @@
-import { test, expect } from '@playwright/test';
-import { appUrl, bootstrap, e2eHeaders, teardown } from './navigation';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders } from './navigation';
 
 test.use({ extraHTTPHeaders: e2eHeaders() });
 
@@ -52,8 +49,8 @@ test.describe('@ui Places view', () => {
   test('Place timeline survives refresh', async ({ page }) => {
     await page.goto(`${appUrl}/places`);
     await page.locator('.cluster:not(.placeholder)').first().click();
-    await page.waitForSelector('.p-outer');
+    await page.waitForSelector('.p-outer:not(.placeholder)');
     await page.reload();
-    await page.waitForSelector('.p-outer');
+    await page.waitForSelector('.p-outer:not(.placeholder)');
   });
 });

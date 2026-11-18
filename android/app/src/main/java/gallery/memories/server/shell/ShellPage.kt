@@ -30,7 +30,7 @@ object ShellPage {
         "media-src 'self' blob: data:",
         "connect-src 'self' https: http: wss: ws: data: blob:",
         "font-src 'self' data:",
-        "frame-src 'self' https://www.openstreetmap.org",
+        "frame-src 'none'",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",
@@ -78,7 +78,8 @@ object ShellPage {
                     attributes["nonce"] = nonce
                     unsafe {
                         val root = webRoot.jsString()
-                        raw("window._oc_webroot = $root; window._oc_appswebroots = {'memories': $root + '/apps/memories'};")
+                        val appRoot = AssetCache.appsPathOf(describe)?.jsString() ?: "$root + '/apps/memories'"
+                        raw("window._oc_webroot = $root; window._oc_appswebroots = {'memories': $appRoot};")
                         raw(
                             """
                             window._oc_capabilities = {

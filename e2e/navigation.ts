@@ -1,4 +1,4 @@
-import { test } from '@playwright/test';
+import { test as base } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 export const username = process.env.E2E_USER || process.env.TEST_USER || 'admin';
@@ -24,7 +24,7 @@ export async function bootstrap({ page }: { page: Page }) {
     logBuffer.push(`[${timestamp}]\t${tag}\t${msg.text()}`);
   });
 
-  await page.clock.install({ time: new Date('2026-07-31T08:00:00') });
+  await page.clock.install({ time: new Date('2026-07-31T08:00:00-07:00') });
 
   // Stub OSM tiles so map tests never hit the network.
   osmTileHits = 0;
@@ -40,12 +40,21 @@ export async function bootstrap({ page }: { page: Page }) {
 
 export async function teardown({}: {}) {
   if (logBuffer.length > 0) {
-    await test.info().attach('js-console.log', {
+    await base.info().attach('js-console.log', {
       body: logBuffer.join('\n'),
     });
     logBuffer = [];
   }
 }
+
+// Bootstraps the page only when a test asks for one, so API tests skip the browser.
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    await bootstrap({ page });
+    await use(page);
+    await teardown({});
+  },
+});
 
 export function e2eHeaders(params?: { timelinePath?: string }): Record<string, string> {
   const entries = Object.entries({
@@ -67,4 +76,27 @@ export function e2eHeaders(params?: { timelinePath?: string }): Record<string, s
 
 export function psub(input: string): string {
   return input.replace(/%wid/g, process.env.TEST_WORKER_INDEX || '0');
+}
+
+// Build an app URL from a path relative to appUrl, skipping null params.
+export function buildUrl(path: string, params: Record<string, string | number | null | undefined> = {}): string {
+  const url = new URL(`${appUrl}${path}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== null && v !== undefined) {
+      url.searchParams.set(k, String(v));
+    }
+  }
+  return url.toString();
+}
+
+// Select a photo with its hover check icon.
+export async function selectPhoto(page: Page, key: number | string) {
+  await page.hover(`.p-outer--${key}`);
+  await page.locator(`.p-outer--${key} > div.select`).click();
+}
+
+// Open a photo in the viewer and wait for it to settle.
+export async function openViewer(page: Page, key: number | string) {
+  await page.locator(`.p-outer--${key} > .img-outer`).click();
+  await page.waitForSelector('.memories-viewer.fully-opened');
 }

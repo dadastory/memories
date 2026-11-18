@@ -1,9 +1,8 @@
 import { API } from '@services/API';
 import { translate as t } from '@services/l10n';
 
-import type PhotoSwipe from 'photoswipe';
 import type { Viewer as PhotoSphereViewer } from '@photo-sphere-viewer/core';
-import type { PsContent } from './types';
+import type { PsContent, PsPhotoSwipe } from './types';
 
 export default class PhotoSphereContentSetup {
   private viewer: PhotoSphereViewer | null = null;
@@ -18,7 +17,7 @@ export default class PhotoSphereContentSetup {
   private tapY = 0;
   private tapT = 0;
 
-  constructor(private lightbox: PhotoSwipe) {
+  constructor(private lightbox: PsPhotoSwipe) {
     lightbox.on('contentActivate', (e) => this.onContentActivate((e as unknown as { content: PsContent }).content));
     lightbox.on('contentDeactivate', (e) => this.onContentEnd((e as unknown as { content: PsContent }).content));
     lightbox.on('contentDestroy', (e) => this.onContentEnd((e as unknown as { content: PsContent }).content));
@@ -103,6 +102,13 @@ export default class PhotoSphereContentSetup {
       });
       this.container = container;
       this.content = content;
+
+      // Disable the native image when sphere is active.
+      if (content.slide) {
+        content.slide.data.nxImageDisabled ??= 0;
+        content.slide.data.nxImageDisabled++;
+        this.lightbox.dispatch('initialZoomPan');
+      }
     } catch (e) {
       console.error('PsPhotoSphere: failed to show panorama', e);
     }
@@ -117,7 +123,16 @@ export default class PhotoSphereContentSetup {
     this.container?.remove();
     this.viewer = null;
     this.container = null;
-    this.content = null;
+
+    // Re-enable the native image when sphere is closed.
+    if (this.content) {
+      if (this.content.slide) {
+        this.content.slide.data.nxImageDisabled ??= 1;
+        this.content.slide.data.nxImageDisabled--;
+        this.lightbox.dispatch('initialZoomPan');
+      }
+      this.content = null;
+    }
   }
 
   private onTapStart(e: PointerEvent): void {

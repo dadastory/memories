@@ -11,7 +11,8 @@ use OCP\Http\Client\IClientService;
 final class BinExt
 {
     public const EXIFTOOL_VER = '13.59';
-    public const GOVOD_VER = '0.6.3';
+    public const GOVOD_VER = '0.7.3';
+    public const VIPS_VER = 'v8.18.7-17';
     public const NX_VER_MIN = '1.1';
 
     private const GO_VOD_PID_FILE = '/tmp/go-vod.pid';
@@ -61,7 +62,7 @@ final class BinExt
             return $this->getTempBin($path, $name, false);
         }
 
-        throw new \Exception("failed to find exiftool temp binary {$target}");
+        throw new \Exception("failed to find temp binary {$target}");
     }
 
     /** Get the name for a binary */
@@ -131,7 +132,7 @@ final class BinExt
     /**
      * Get path to exiftool binary for proc_open.
      *
-     * @return string[]
+     * @return list<string>
      */
     public function getExiftool(): array
     {
@@ -195,15 +196,13 @@ final class BinExt
         return $this->systemConfig->get('memories.vod.connect') ?: [$bind];
     }
 
-    /** Get the upstream URL for a go-vod API (vod, create). */
-    public function getGoVodEndpoint(string $client, string $endpoint): string
+    /** Get the go-vod server (host:port) for a client. */
+    public function getGoVodServer(string $client): string
     {
         $servers = $this->getGoVodServers();
 
         // Sticky-route each client to one server so go-vod state stays local
-        $srv = $servers[(crc32($client) & 0xFFFFFFFF) % \count($servers)];
-
-        return "http://{$srv}/{$endpoint}";
+        return $servers[(crc32($client) & 0xFFFFFFFF) % \count($servers)];
     }
 
     public function goVodTConfig(): array
@@ -220,6 +219,7 @@ final class BinExt
             'nvenc' => $this->systemConfig->get('memories.vod.nvenc'),
             'nvencTemporalAQ' => $this->systemConfig->get('memories.vod.nvenc.temporal_aq'),
             'nvencScale' => $this->systemConfig->get('memories.vod.nvenc.scale'),
+            'nvencTonemapCUDA' => $this->systemConfig->get('memories.vod.nvenc.tonemap_cuda'),
 
             'useTranspose' => $this->systemConfig->get('memories.vod.use_transpose'),
             'forceSwTranspose' => $this->systemConfig->get('memories.vod.use_transpose.force_sw'),
@@ -241,6 +241,13 @@ final class BinExt
             'tempdir' => $dir('memories.vod.tempdir', sys_get_temp_dir().'/go-vod/'),
             'cacheDir' => $dir('memories.vod.cachedir', sys_get_temp_dir().'/go-vod-cache'),
             'nextcloudUrl' => rtrim($this->systemConfig->get('memories.vod.nc_url'), '/'),
+            'bridge' => [
+                'enabled' => $this->systemConfig->get('memories.vod.bridge.enabled'),
+                'maxWorkers' => $this->systemConfig->get('memories.vod.bridge.max_workers'),
+                'minWorkers' => $this->systemConfig->get('memories.vod.bridge.min_workers'),
+                'workerTTL' => $this->systemConfig->get('memories.vod.bridge.worker_ttl'),
+                'idleTime' => $this->systemConfig->get('memories.vod.bridge.idle_time'),
+            ],
         ];
     }
 
@@ -317,12 +324,16 @@ final class BinExt
                 escapeshellarg($logFile),
             );
 
+            // Generic env vars read by go-vod would override the config file
+            $procEnv = getenv();
+            unset($procEnv['NEXTCLOUD_HOST'], $procEnv['NEXTCLOUD_ALLOW_INSECURE'], $procEnv['CACHE_DIR']);
+
             $pipes = [];
             $proc = proc_open(['sh', '-c', $shell], [
-                0 => ['file', '/dev/null', 'r'],
+                0 => ['null'],
                 1 => ['pipe', 'w'],
-                2 => ['file', '/dev/null', 'w'],
-            ], $pipes);
+                2 => ['null'],
+            ], $pipes, null, $procEnv);
 
             $childPid = 0;
             if (\is_resource($proc)) {
@@ -357,12 +368,19 @@ final class BinExt
         // Ensure transcoder is running
         $this->ensureGoVod();
 
+        $client = $this->clientService->newClient();
+        $options = [
+            'timeout' => 1,
+            'connect_timeout' => 1,
+            'nextcloud' => ['allow_local_address' => true],
+        ];
+
         try {
-            $res = $this->clientService->newClient()->get("http://{$server}/health", [
-                'timeout' => 1,
-                'connect_timeout' => 1,
-                'nextcloud' => ['allow_local_address' => true],
-            ]);
+            $start = hrtime(true);
+            $client->get("http://{$server}/ping", $options);
+            $pingMs = round((float) (hrtime(true) - $start) / 1e6, 1);
+
+            $res = $client->get("http://{$server}/health", $options);
         } catch (\Exception $e) {
             throw new \Exception('failed to connect: '.$e->getMessage());
         }
@@ -383,6 +401,7 @@ final class BinExt
         return [
             'version' => $version,
             'latencyMs' => isset($json['latencyMs']) ? (int) $json['latencyMs'] : null,
+            'pingMs' => $pingMs,
         ];
     }
 
@@ -429,6 +448,67 @@ final class BinExt
         }
 
         return $goVodPath;
+    }
+
+    /**
+     * Get path to vips binary for execution.
+     */
+    public function getVipsBin(): string
+    {
+        $path = $this->systemConfig->get('memories.vips.path');
+        if (empty($path)) {
+            throw new \Exception('vips binary is not configured (run occ maintenance:repair)');
+        }
+
+        if ($this->systemConfig->get('memories.vips.direct')) {
+            return $path;
+        }
+
+        return $this->getTempBin($path, $this->getName('vips', self::VIPS_VER));
+    }
+
+    public function testVipsBin(string $path): string
+    {
+        $version = trim(Util::execSafe([$path, '--version'], 3000) ?: '');
+        if (!preg_match('/^\d+\.\d+\.\d+(-\d+)?$/', $version)) {
+            throw new \Exception("failed to detect version, found {$version}");
+        }
+
+        $target = (string) preg_replace('/^v/', '', self::VIPS_VER);
+        if (!version_compare($version, $target, '=')) {
+            throw new \Exception("version does not match: expected {$target} but found {$version}");
+        }
+
+        return $version;
+    }
+
+    /**
+     * Detect the vips binary to use.
+     */
+    public function detectVips(): false|string
+    {
+        $vipsPath = $this->systemConfig->get('memories.vips.path');
+
+        if (empty($vipsPath) || !file_exists($vipsPath)) {
+            // Detect architecture
+            $arch = \OCA\Memories\Util::getArch();
+            $path = __DIR__."/../../bin-ext/vips-{$arch}";
+            $vipsPath = realpath($path);
+
+            if (!$vipsPath) {
+                return false;
+            }
+
+            // Set config
+            $this->systemConfig->set('memories.vips.path', $vipsPath);
+
+            // Make executable
+            if (!is_executable($vipsPath)) {
+                @chmod($vipsPath, 0o755);
+            }
+        }
+
+        return $vipsPath;
     }
 
     public function detectFFmpeg(): ?string

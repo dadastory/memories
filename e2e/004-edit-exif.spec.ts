@@ -1,9 +1,6 @@
-import { test, expect } from '@playwright/test';
-import { appUrl, e2eHeaders, bootstrap, teardown } from './navigation';
+import { expect } from '@playwright/test';
+import { test, appUrl, e2eHeaders, openViewer } from './navigation';
 import { DavClient } from './utils';
-
-test.beforeEach(bootstrap);
-test.afterEach(teardown);
 
 test.use({
   extraHTTPHeaders: e2eHeaders({
@@ -21,7 +18,7 @@ test.describe('Metadata', () => {
 
     await test.step('Open dialog', async () => {
       await page.goto(appUrl);
-      await page.locator(`.p-outer.fill-block.p-outer--${fileid1} > .img-outer`).click();
+      await openViewer(page, fileid1);
 
       await page.getByRole('button', { name: 'Actions' }).click();
       await page.getByRole('menuitem', { name: 'Edit metadata' }).click();
@@ -36,6 +33,12 @@ test.describe('Metadata', () => {
     await test.step('Verify in viewer', async () => {
       await expect(page.locator('.memories-viewer .exif.title')).toHaveText(testTitle);
       await expect(page.locator('.memories-viewer .exif.description')).toHaveText(testDescription);
+    });
+
+    await test.step('Verify on server', async () => {
+      const { exif } = await dav.imageInfo(fileid1);
+      expect(exif?.Title).toBe(testTitle);
+      expect(exif?.Description).toBe(testDescription);
     });
   });
 });
